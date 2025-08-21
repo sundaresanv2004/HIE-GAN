@@ -1,5 +1,5 @@
-torch==2.8.0
-torchvision
+torch~=2.8.0
+torchvision~=0.23.0
 timm
 pytorch3d
 torch-geometric
@@ -9,3 +9,4 @@ matplotlib
 scikit-image
 trimesh
 open3d
+pillow~=11.3.0
