@@ -1,0 +1,11 @@
+torch==2.8.0
+torchvision
+timm
+pytorch3d
+torch-geometric
+numpy
+scipy
+matplotlib
+scikit-image
+trimesh
+open3d
