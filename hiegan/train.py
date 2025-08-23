@@ -1,139 +1,114 @@
 import os
 import torch
 from torch.utils.data import DataLoader
-from torch import nn, optim
+from torch.optim import Adam
+from pytorch3d.utils import ico_sphere
+from pytorch3d.structures import Meshes
 from tqdm import tqdm
-import matplotlib.pyplot as plt
+from functools import partial
 
-# Import modules
+# --- Import your project modules ---
 from hiegan.config import Config
 from hiegan.dataset import ShapeNetMVDataset
-from hiegan.utils.mesh_utils import load_and_normalize_mesh, mesh_to_pointcloud
-from hiegan.utils.render_utils import render_mesh_rgb, simple_renderer
+from hiegan.utils.collate import mesh_collate_fn
+from hiegan.utils.mesh_utils import mesh_to_pointcloud
+from hiegan.utils.loss_utils import HieGanLoss
 from hiegan.models.generator import HIEGenerator
-from hiegan.models.discriminator import PointCloudDiscriminator
-from hiegan.utils.loss_utils import chamfer_loss, occupancy_iou, f1_score
-
-# Optional: Chamfer Distance from PyTorch3D
-from pytorch3d.loss import chamfer_distance
+from hiegan.models.discriminator import PointCloudDiscriminator  # Your new discriminator name
 
 # ---------------------- Config & Device ----------------------
 cfg = Config()
-device = torch.device(cfg.DEVICE if torch.cuda.is_available() or cfg.DEVICE == "mps" else "cpu")
+device = torch.device(cfg.DEVICE)
 print("Using device:", device)
-
-# ---------------------- Dataset & Loader ----------------------
-dataset_path = "../data/ShapenetCoreV2"
-ds = ShapeNetMVDataset(dataset_path, image_size=cfg.IMAGE_SIZE, multi_view=cfg.MULTI_VIEW)
-dl = DataLoader(ds, batch_size=cfg.BATCH_SIZE, shuffle=True, num_workers=0)
-
-print(f"Dataset size: {len(ds)}")
-
-# ---------------------- Models ----------------------
-G = HIEGenerator(latent_dim=cfg.LATENT_DIM, device=str(device)).to(device)
-D = PointCloudDiscriminator().to(device)
-
-# ---------------------- Optimizers ----------------------
-G_optimizer = optim.Adam(G.parameters(), lr=cfg.LR, weight_decay=cfg.WEIGHT_DECAY)
-D_optimizer = optim.Adam(D.parameters(), lr=cfg.LR, weight_decay=cfg.WEIGHT_DECAY)
-
-# ---------------------- Loss Functions ----------------------
-bce_loss = nn.BCELoss()
-
-# ---------------------- Checkpoint directory ----------------------
 os.makedirs(cfg.CHECKPOINT_DIR, exist_ok=True)
 
-# ---------------------- Training Loop ----------------------
+# ---------------------- Dataset & Loader (Corrected) ----------------------
+# This uses the efficient collate function we defined before.
+ds = ShapeNetMVDataset(cfg.DATASET_ROOT, image_size=cfg.IMAGE_SIZE)
+collate_with_device = partial(mesh_collate_fn, device=device)
+dl = DataLoader(
+    ds, batch_size=cfg.BATCH_SIZE, shuffle=True,
+    num_workers=cfg.NUM_WORKERS, collate_fn=collate_with_device,
+    pin_memory=True, drop_last=True
+)
+print(f"Dataset size: {len(ds)}")
+
+# ---------------------- Models & Template Mesh (Corrected) ----------------------
+G = HIEGenerator(latent_dim=cfg.LATENT_DIM).to(device)
+D = PointCloudDiscriminator(num_points=cfg.NUM_POINTS_SAMPLED).to(device)
+
+# CORRECTED: Use a fixed icosphere as the template mesh
+template_mesh = ico_sphere(level=3, device=device)
+template_verts = template_mesh.verts_list()[0]
+template_faces = template_mesh.faces_list()[0]
+template_edges = template_mesh.edges_packed().t()  # Get correct edge index
+
+# ---------------------- Optimizers & Loss (Corrected) ----------------------
+G_optimizer = Adam(G.parameters(), lr=cfg.LR_G)
+D_optimizer = Adam(D.parameters(), lr=cfg.LR_D)
+criterion = HieGanLoss(cfg)
+
+# ---------------------- Training Loop (Corrected) ----------------------
 for epoch in range(cfg.EPOCHS):
     G.train()
     D.train()
-    epoch_recon_loss = 0.0
-    epoch_adv_loss = 0.0
-    epoch_chamfer = 0.0
-    epoch_iou = 0.0
-    epoch_f1 = 0.0
 
-    pbar = tqdm(dl, desc=f"Epoch {epoch+1}/{cfg.EPOCHS}")
-    for imgs, mesh_paths in pbar:
-        imgs = imgs[:,0].to(device)
-        batch_size = imgs.shape[0]
+    pbar = tqdm(dl, desc=f"Epoch {epoch + 1}/{cfg.EPOCHS}")
+    for imgs, gt_meshes in pbar:
+        # Data is already on the correct device thanks to collate_fn
+        # imgs shape is already (B, C, H, W)
 
-        # Load template mesh and edges (for explicit branch)
-        template_mesh = load_and_normalize_mesh(mesh_paths[0], device=str(device))
-        template_vertices = template_mesh.verts_list()[0]
-        edge_index = torch.tensor([[0,1],[1,0]], dtype=torch.long).to(device)  # replace with actual mesh edges
-
-        # Sample random points for implicit SDF
-        sample_xyz = torch.rand(batch_size, 1024, 3, device=device)*2 -1
-
-        # ------------------ Generator forward ------------------
-        G_out = G(imgs, template_mesh_vertices=template_vertices, template_mesh_edges=edge_index, sample_xyz=sample_xyz)
-        implicit_sdf = G_out['implicit_sdf']
-        fused_vertices = G_out['fused_vertices']
-
-        # ------------------ Compute reconstruction losses ------------------
-        gt_mesh = load_and_normalize_mesh(mesh_paths[0], device=str(device))
-        gt_points = mesh_to_pointcloud(gt_mesh, num_samples=1024)
-        pred_points = fused_vertices.unsqueeze(1) if fused_vertices is not None else sample_xyz
-
-        recon_loss = chamfer_loss(pred_points, gt_points)
-        iou = occupancy_iou(implicit_sdf, sample_xyz)
-        f1 = f1_score(pred_points, gt_points)
-
-        # ------------------ Discriminator update ------------------
+        # --- 1. Train Discriminator ---
         D_optimizer.zero_grad()
-        D_real = D(gt_points)
-        D_fake = D(pred_points.detach())
-        real_labels = torch.ones(batch_size,1,device=device)
-        fake_labels = torch.zeros(batch_size,1,device=device)
-        D_loss = nn.BCELoss()(D_real, real_labels) + nn.BCELoss()(D_fake, fake_labels)
-        D_loss.backward()
+
+        # Get real points from ground truth meshes
+        real_points = mesh_to_pointcloud(gt_meshes, cfg.NUM_POINTS_SAMPLED)
+
+        # Generate fake points (no gradients needed for generator here)
+        with torch.no_grad():
+            gen_outputs = G(imgs, template_verts, template_edges)
+            deformed_verts = gen_outputs["deformed_vertices"]
+            fake_meshes = Meshes(verts=deformed_verts, faces=template_faces.expand(cfg.BATCH_SIZE, -1, -1))
+            fake_points = mesh_to_pointcloud(fake_meshes, cfg.NUM_POINTS_SAMPLED)
+
+        # Get discriminator logits
+        disc_real_logits = D(real_points)
+        disc_fake_logits = D(fake_points.detach())  # Detach to be safe
+
+        # Compute loss and update discriminator
+        d_losses = criterion.get_discriminator_loss(disc_real_logits, disc_fake_logits)
+        d_losses["d_loss"].backward()
         D_optimizer.step()
 
-        # ------------------ Generator update ------------------
+        # --- 2. Train Generator ---
         G_optimizer.zero_grad()
-        D_fake_for_G = D(pred_points)
-        adv_loss = nn.BCELoss()(D_fake_for_G, real_labels)
-        G_total_loss = recon_loss + 0.1*adv_loss
-        G_total_loss.backward()
+
+        # Generate fake meshes again, this time tracking gradients for the generator
+        gen_outputs = G(imgs, template_verts, template_edges)
+        deformed_verts = gen_outputs["deformed_vertices"]
+        fake_meshes_for_g = Meshes(verts=deformed_verts, faces=template_faces.expand(cfg.BATCH_SIZE, -1, -1))
+        fake_points_for_g = mesh_to_pointcloud(fake_meshes_for_g, cfg.NUM_POINTS_SAMPLED)
+
+        # Get discriminator's (updated) opinion on the fake meshes
+        disc_fake_logits_for_g = D(fake_points_for_g)
+
+        # Compute loss and update generator
+        g_losses = criterion.get_generator_loss(gen_outputs, gt_meshes, disc_fake_logits_for_g)
+        g_losses["g_loss"].backward()
         G_optimizer.step()
 
-        # ------------------ Accumulate metrics ------------------
-        epoch_recon_loss += recon_loss.item()
-        epoch_adv_loss += adv_loss.item()
-        epoch_chamfer += recon_loss.item()
-        epoch_iou += iou.item()
-        epoch_f1 += f1.item()
-
+        # --- Update Progress Bar ---
         pbar.set_postfix({
-            "Recon": f"{recon_loss.item():.4f}",
-            "Adv": f"{adv_loss.item():.4f}",
-            "IoU": f"{iou.item():.4f}",
-            "F1": f"{f1.item():.4f}"
+            "G_Loss": f"{g_losses['g_loss'].item():.4f}",
+            "D_Loss": f"{d_losses['d_loss'].item():.4f}",
+            "Chamfer": f"{g_losses['chamfer'].item():.4f}"
         })
 
-    # ------------------ Save checkpoint ------------------
-    checkpoint_path = os.path.join(cfg.CHECKPOINT_DIR, f"hiegan_epoch{epoch+1}.pth")
-    torch.save({
-        'epoch': epoch,
-        'generator_state_dict': G.state_dict(),
-        'discriminator_state_dict': D.state_dict(),
-        'optimizer_G_state_dict': G_optimizer.state_dict(),
-        'optimizer_D_state_dict': D_optimizer.state_dict(),
-    }, checkpoint_path)
-    print(f"Checkpoint saved at {checkpoint_path}")
-
-    # ------------------ Visualization ------------------
-    G.eval()
-    with torch.no_grad():
-        fused_mesh_viz = G_out['fused_vertices'][0].cpu()
-        renderer = simple_renderer(device=str(device))
-        # Render as image
-        mesh_img = render_mesh_rgb(template_mesh, renderer, device=str(device))
-        import matplotlib.pyplot as plt
-        plt.figure(figsize=(4,4))
-        plt.imshow(mesh_img[0].cpu().numpy())
-        plt.axis("off")
-        plt.title(f"Epoch {epoch+1} Preview\nChamfer: {epoch_chamfer/len(dl):.4f}, IoU: {epoch_iou/len(dl):.4f}, F1: {epoch_f1/len(dl):.4f}")
-        plt.show()
-
+    # --- Save Checkpoint ---
+    if (epoch + 1) % 10 == 0:
+        checkpoint_path = os.path.join(cfg.CHECKPOINT_DIR, f"hiegan_epoch_{epoch + 1}.pth")
+        torch.save({
+            'generator_state_dict': G.state_dict(),
+            'discriminator_state_dict': D.state_dict(),
+        }, checkpoint_path)
+        print(f"\nCheckpoint saved at {checkpoint_path}")

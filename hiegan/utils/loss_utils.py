@@ -1,52 +1,47 @@
-# hiegan/utils/loss_utils.py
 import torch
+import torch.nn.functional as F
 from pytorch3d.loss import chamfer_distance
+from pytorch3d.structures import Meshes
+from .mesh_utils import mesh_to_pointcloud
 
 
-def chamfer_loss(pred_points, gt_points):
-    """
-    Compute Chamfer Distance between predicted and ground-truth point clouds.
+class HieGanLoss(torch.nn.Module):
+    def __init__(self, cfg):
+        super().__init__()
+        self.cfg = cfg
 
-    pred_points: (B, N, 3)
-    gt_points: (B, M, 3)
-    """
-    loss, _ = chamfer_distance(pred_points, gt_points)
-    return loss
+    def get_generator_loss(self, gen_outputs, gt_meshes, disc_fake_logits):
+        deformed_verts = gen_outputs["deformed_vertices"]
+        B = deformed_verts.shape[0]
 
+        # 1. Chamfer Reconstruction Loss
+        # Assumes gt_meshes provides the correct face topology for the template
+        faces = gt_meshes.faces_list()[0].expand(B, -1, -1)
+        pred_meshes = Meshes(verts=deformed_verts, faces=faces)
 
-def occupancy_iou(pred_sdf, sample_xyz, threshold=0.0):
-    """
-    Compute IoU of occupancy grids from predicted SDF values.
+        pred_points = mesh_to_pointcloud(pred_meshes, self.cfg.NUM_POINTS_SAMPLED)
+        gt_points = mesh_to_pointcloud(gt_meshes, self.cfg.NUM_POINTS_SAMPLED)
+        loss_chamfer, _ = chamfer_distance(pred_points, gt_points)
 
-    pred_sdf: (B, N, 1) predicted SDF at sampled points
-    sample_xyz: (B, N, 3) corresponding 3D points
-    threshold: SDF threshold to consider occupied
-    """
-    pred_occ = (pred_sdf <= threshold).float()  # 1 if inside mesh
-    # For simplicity, assume ground-truth occupancy = 1 for all points in point cloud
-    gt_occ = torch.ones_like(pred_occ)
-    intersection = (pred_occ * gt_occ).sum(dim=1)
-    union = ((pred_occ + gt_occ) > 0).sum(dim=1)
-    iou = intersection / (union + 1e-8)
-    return iou.mean()
+        # 2. Adversarial Loss (numerically stable version)
+        loss_adv = F.binary_cross_entropy_with_logits(
+            disc_fake_logits, torch.ones_like(disc_fake_logits)
+        )
 
+        total_loss = self.cfg.W_CHAMFER * loss_chamfer + self.cfg.W_ADV * loss_adv
 
-def f1_score(pred_points, gt_points, threshold=0.01):
-    """
-    Compute F1 score between predicted and GT point clouds.
-    threshold: distance tolerance to count as correct
-    """
-    B = pred_points.shape[0]
-    f1_list = []
-    for b in range(B):
-        pd = pred_points[b]  # (N,3)
-        gt = gt_points[b]  # (M,3)
-        # pairwise distances
-        dist_matrix = torch.cdist(pd, gt)  # (N,M)
-        # precision
-        precision = (dist_matrix.min(dim=1)[0] < threshold).float().mean()
-        # recall
-        recall = (dist_matrix.min(dim=0)[0] < threshold).float().mean()
-        f1 = 2 * precision * recall / (precision + recall + 1e-8)
-        f1_list.append(f1)
-    return torch.stack(f1_list).mean()
+        return {
+            "g_loss": total_loss,
+            "chamfer": loss_chamfer,
+            "g_adv": loss_adv,
+        }
+
+    def get_discriminator_loss(self, disc_real_logits, disc_fake_logits):
+        loss_real = F.binary_cross_entropy_with_logits(
+            disc_real_logits, torch.ones_like(disc_real_logits)
+        )
+        loss_fake = F.binary_cross_entropy_with_logits(
+            disc_fake_logits, torch.zeros_like(disc_fake_logits)
+        )
+        total_loss = (loss_real + loss_fake) / 2
+        return {"d_loss": total_loss}
