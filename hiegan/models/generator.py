@@ -1,4 +1,3 @@
-# hiegan/models/generator.py
 import torch
 import torch.nn as nn
 from hiegan.models.encoder_vit import ViTEncoder

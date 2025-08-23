@@ -1,12 +1,25 @@
-torch~=2.8.0
-torchvision~=0.23.0
-timm
-pytorch3d
-torch-geometric
+torch>=2.1,<2.4
+torchvision
+
+# --- Vision & Graph Models ---
+timm                 # For Vision Transformer (ViT) models
+torch-geometric      # For Graph Convolutional Networks (GCN)
+
+# --- 3D Processing & Utilities ---
+# PyTorch3D is NOT listed here as it requires a special installation.
+# See the installation notes below.
+iopath               # PyTorch3D dependency
+fvcore               # PyTorch3D dependency
+ninja                # For building custom CUDA kernels
+scikit-image         # For image processing and marching cubes
+trimesh              # Robust library for loading/processing meshes
+open3d               # 3D data processing and visualization
+
+# --- Experimentation & Utilities ---
+matplotlib           # For plotting
 numpy
 scipy
-matplotlib
-scikit-image
-trimesh
-open3d
-pillow~=11.3.0
+Pillow>=10.0         # Image loading
+tensorboard          # For logging experiments (highly recommended)
+tqdm                 # For beautiful progress bars
+notebook             # For running .ipynb files locally

@@ -1,13 +1,16 @@
 from dataclasses import dataclass, field
+from pathlib import Path
 import torch
 
 
 @dataclass
 class Config:
+    PROJECT_ROOT: Path = Path(__file__).parent.parent
+
     # Paths
-    DATASET_ROOT: str = "../data/ShapeNetCore.v2"
-    CHECKPOINT_DIR: str = "../outputs/checkpoints"
-    RENDERS_DIR: str = "../outputs/renders"
+    DATASET_ROOT: str = str(PROJECT_ROOT / "dataset/ShapeNetCore.v2")
+    CHECKPOINT_DIR: str = str(PROJECT_ROOT / "outputs/checkpoints")
+    RENDERS_DIR: str = str(PROJECT_ROOT / "outputs/renders")
 
     # Data
     IMAGE_SIZE: int = 224
