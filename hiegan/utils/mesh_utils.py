@@ -35,18 +35,8 @@ def mesh_to_pointcloud(mesh: Meshes, num_samples: int = 2048) -> torch.Tensor:
     Samples points on the mesh surface.
     Returns: (B, num_samples, 3) points
     """
-    # Get original device
-    original_device = mesh.device
-
-    # Move to CPU for PyTorch3D operations (MPS compatibility)
-    mesh_cpu = mesh.to('cpu')
-
-    # Sample points on CPU
-    pts = sample_points_from_meshes(mesh_cpu, num_samples=num_samples)
-
-    # Move back to original device
-    pts = pts.to(original_device)
-
+    # All operations on the same device as the mesh
+    pts = sample_points_from_meshes(mesh, num_samples=num_samples)
     return pts
 
 
