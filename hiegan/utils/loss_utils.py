@@ -1,47 +1,78 @@
 import torch
-import torch.nn.functional as F
+import torch.nn as nn
 from pytorch3d.loss import chamfer_distance
-from pytorch3d.structures import Meshes
-from .mesh_utils import mesh_to_pointcloud
+from pytorch3d.ops import sample_points_from_meshes
 
 
-class HieGanLoss(torch.nn.Module):
-    def __init__(self, cfg):
+class HIEGANLoss(nn.Module):
+    """
+    Combined loss function for HIE-GAN
+    """
+
+    def __init__(self,
+                 chamfer_weight=1.0,
+                 sdf_weight=0.5,
+                 explicit_weight=0.5,
+                 fusion_weight=1.0):
         super().__init__()
-        self.cfg = cfg
 
-    def get_generator_loss(self, gen_outputs, gt_meshes, disc_fake_logits):
-        deformed_verts = gen_outputs["deformed_vertices"]
-        B = deformed_verts.shape[0]
+        self.chamfer_weight = chamfer_weight
+        self.sdf_weight = sdf_weight
+        self.explicit_weight = explicit_weight
+        self.fusion_weight = fusion_weight
 
-        # 1. Chamfer Reconstruction Loss
-        # Assumes gt_meshes provides the correct face topology for the template
-        faces = gt_meshes.faces_list()[0].expand(B, -1, -1)
-        pred_meshes = Meshes(verts=deformed_verts, faces=faces)
+    def chamfer_loss(self, pred_points, gt_points):
+        """Compute Chamfer distance"""
+        loss, _ = chamfer_distance(pred_points, gt_points)
+        return loss
 
-        pred_points = mesh_to_pointcloud(pred_meshes, self.cfg.NUM_POINTS_SAMPLED)
-        gt_points = mesh_to_pointcloud(gt_meshes, self.cfg.NUM_POINTS_SAMPLED)
-        loss_chamfer, _ = chamfer_distance(pred_points, gt_points)
+    def sdf_loss(self, pred_sdf, gt_sdf):
+        """L1 loss for SDF values"""
+        return F.l1_loss(pred_sdf, gt_sdf)
 
-        # 2. Adversarial Loss (numerically stable version)
-        loss_adv = F.binary_cross_entropy_with_logits(
-            disc_fake_logits, torch.ones_like(disc_fake_logits)
-        )
+    def explicit_loss(self, pred_vertices, gt_mesh):
+        """Loss for explicit mesh vertices"""
+        gt_points = sample_points_from_meshes(gt_mesh, num_samples=2048)
+        pred_points = pred_vertices  # Assuming same number of points
 
-        total_loss = self.cfg.W_CHAMFER * loss_chamfer + self.cfg.W_ADV * loss_adv
+        # If different sizes, sample from predicted vertices
+        if pred_vertices.shape[1] != gt_points.shape[1]:
+            indices = torch.randint(0, pred_vertices.shape[1],
+                                    (gt_points.shape[1],), device=pred_vertices.device)
+            pred_points = pred_vertices[:, indices, :]
 
-        return {
-            "g_loss": total_loss,
-            "chamfer": loss_chamfer,
-            "g_adv": loss_adv,
-        }
+        return self.chamfer_loss(pred_points, gt_points)
 
-    def get_discriminator_loss(self, disc_real_logits, disc_fake_logits):
-        loss_real = F.binary_cross_entropy_with_logits(
-            disc_real_logits, torch.ones_like(disc_real_logits)
-        )
-        loss_fake = F.binary_cross_entropy_with_logits(
-            disc_fake_logits, torch.zeros_like(disc_fake_logits)
-        )
-        total_loss = (loss_real + loss_fake) / 2
-        return {"d_loss": total_loss}
+    def forward(self, outputs, gt_mesh, gt_sdf=None):
+        """
+        Compute total loss
+
+        Args:
+            outputs: Dictionary from HIE generator
+            gt_mesh: Ground truth mesh
+            gt_sdf: Ground truth SDF values (optional)
+        """
+        total_loss = 0.0
+        loss_dict = {}
+
+        # Chamfer loss for final fused output (if available)
+        if 'fused_points' in outputs:
+            gt_points = sample_points_from_meshes(gt_mesh, num_samples=outputs['fused_points'].shape[1])
+            chamfer_loss = self.chamfer_loss(outputs['fused_points'], gt_points)
+            total_loss += self.fusion_weight * chamfer_loss
+            loss_dict['fusion_chamfer'] = chamfer_loss
+
+        # SDF loss (if GT SDF available)
+        if 'implicit_sdf' in outputs and gt_sdf is not None:
+            sdf_loss = self.sdf_loss(outputs['implicit_sdf'], gt_sdf)
+            total_loss += self.sdf_weight * sdf_loss
+            loss_dict['sdf_loss'] = sdf_loss
+
+        # Explicit mesh loss
+        if 'deformed_vertices' in outputs:
+            explicit_loss = self.explicit_loss(outputs['deformed_vertices'], gt_mesh)
+            total_loss += self.explicit_weight * explicit_loss
+            loss_dict['explicit_loss'] = explicit_loss
+
+        loss_dict['total_loss'] = total_loss
+        return total_loss, loss_dict

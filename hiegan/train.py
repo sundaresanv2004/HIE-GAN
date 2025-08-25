@@ -6,6 +6,7 @@ from pytorch3d.utils import ico_sphere
 from pytorch3d.structures import Meshes
 from tqdm import tqdm
 from functools import partial
+import torch.multiprocessing as mp
 
 # --- Import your project modules ---
 from hiegan.config import Config
@@ -112,3 +113,8 @@ for epoch in range(cfg.EPOCHS):
             'discriminator_state_dict': D.state_dict(),
         }, checkpoint_path)
         print(f"\nCheckpoint saved at {checkpoint_path}")
+
+
+if __name__ == '__main__':
+    mp.set_start_method('spawn', force=True)
+    train()

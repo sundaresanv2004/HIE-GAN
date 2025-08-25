@@ -18,17 +18,27 @@ class Config:
     VIEWS_PER_ITEM: int = 1
 
     # Training
-    BATCH_SIZE: int = 2
-    NUM_WORKERS: int = 2
+    BATCH_SIZE: int = 4
+    NUM_WORKERS: int = 0
     EPOCHS: int = 100
     LR: float = 1e-4
     WEIGHT_DECAY: float = 1e-4
     LATENT_DIM: int = 512
     SEED: int = 42
 
+    # Model Architecture
+    HIDDEN_DIM: int = 512
+    NUM_ATTENTION_HEADS: int = 8
+    NUM_TRANSFORMER_LAYERS: int = 6
+
+    # Loss weights
+    CHAMFER_WEIGHT: float = 1.0
+    ADVERSARIAL_WEIGHT: float = 0.1
+    IMPLICIT_WEIGHT: float = 0.5
+    EXPLICIT_WEIGHT: float = 0.5
+
     # Device
     DEVICE: str = field(default_factory=lambda: (
         "cuda" if torch.cuda.is_available()
-        else "mps" if torch.backends.mps.is_available() else "cpu"
+        else "cpu"
     ))
-

@@ -1,9 +1,9 @@
-torch>=2.1,<2.4
-torchvision
+torch~=2.8.0
+torchvision~=0.23.0
 
 # --- Vision & Graph Models ---
-timm                 # For Vision Transformer (ViT) models
-torch-geometric      # For Graph Convolutional Networks (GCN)
+timm~=1.0.19
+torch-geometric~=2.6.1
 
 # --- 3D Processing & Utilities ---
 # PyTorch3D is NOT listed here as it requires a special installation.
@@ -21,5 +21,7 @@ numpy
 scipy
 Pillow>=10.0         # Image loading
 tensorboard          # For logging experiments (highly recommended)
-tqdm                 # For beautiful progress bars
+tqdm~=4.67.1
 notebook             # For running .ipynb files locally
+pytorch3d~=0.7.8
+dataclasses~=0.8

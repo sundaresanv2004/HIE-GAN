@@ -1,43 +1,51 @@
-from typing import List, Tuple, Dict
+from typing import List, Tuple
 import torch
 from pytorch3d.structures import Meshes
 from .mesh_utils import load_and_normalize_mesh
 
 
-def mesh_collate_fn(batch: List[Tuple[torch.Tensor, str]], device: str = "cpu") -> Tuple[torch.Tensor, Meshes]:
+class MeshCollator:
     """
-    Custom collate function to load meshes in parallel with DataLoader workers.
-
-    Args:
-        batch (List[Tuple[torch.Tensor, str]]): A list of samples from the Dataset,
-            where each sample is a tuple of (image_tensor, mesh_path).
-        device (str): The device to move the final tensors to.
-
-    Returns:
-        Tuple[torch.Tensor, Meshes]: A tuple containing:
-            - A batched tensor of images of shape (B * V, 3, H, W).
-            - A PyTorch3D Meshes object representing the batch of loaded meshes.
+    Class-based collator that is robust to pickling errors in multiprocessing.
     """
-    all_imgs = []
-    all_meshes_verts = []
-    all_meshes_faces = []
 
-    for imgs_tensor, mesh_path in batch:
-        all_imgs.append(imgs_tensor)
+    def __init__(self, device: str = "cpu"):
+        self.device = device
 
-        # 1. Load the mesh to the CPU within the worker process.
-        mesh = load_and_normalize_mesh(mesh_path, device="cpu")
+    def __call__(self, batch: List[Tuple[torch.Tensor, str, dict]]) -> Tuple[torch.Tensor, Meshes, List[dict]]:
+        """
+        Processes a batch of samples.
+        batch: List of (imgs_tensor, mesh_path, metadata) tuples
+        """
+        all_imgs = []
+        all_meshes_verts = []
+        all_meshes_faces = []
+        all_metadata = []
 
-        all_meshes_verts.append(mesh.verts_list()[0])
-        all_meshes_faces.append(mesh.faces_list()[0])
+        for imgs_tensor, mesh_path, metadata in batch:
+            try:
+                all_imgs.append(imgs_tensor)
 
-    # Batched tensors are created on the CPU
-    batched_imgs = torch.cat(all_imgs, dim=0)
-    batched_meshes_cpu = Meshes(
-        verts=all_meshes_verts,
-        faces=all_meshes_faces
-    )
+                # Load mesh on CPU first to avoid memory issues
+                mesh = load_and_normalize_mesh(mesh_path, device="cpu")
+                all_meshes_verts.append(mesh.verts_list()[0])
+                all_meshes_faces.append(mesh.faces_list()[0])
+                all_metadata.append(metadata)
 
-    # 2. Move the entire batch to the target device in one go.
-    # This happens in the main process after the workers are done.
-    return batched_imgs.to(device), batched_meshes_cpu.to(device)
+            except Exception as e:
+                print(f"Error processing sample in batch: {e}")
+                continue
+
+        if not all_imgs:
+            raise ValueError("No valid samples in batch")
+
+        # Combine images: (B*V, C, H, W) where V is views per item
+        batched_imgs = torch.cat(all_imgs, dim=0).to(self.device)
+
+        # Create batched meshes
+        batched_meshes = Meshes(
+            verts=all_meshes_verts,
+            faces=all_meshes_faces
+        ).to(self.device)
+
+        return batched_imgs, batched_meshes, all_metadata
