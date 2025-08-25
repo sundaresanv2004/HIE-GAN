@@ -46,7 +46,7 @@ class MeshFusion(nn.Module):
             sample_points: (B, N, 3) - query points for fusion
 
         Returns:
-            fused_points: (B, N, 3) - final 3D coordinates
+            dict containing fused outputs
         """
         B, N, _ = sample_points.shape
 
@@ -77,6 +77,11 @@ class MeshFusion(nn.Module):
         refinement_input = torch.cat([latent_expanded, fused_base], dim=-1)
         refinement_offset = self.refinement(refinement_input)
 
-        fused_points = fused_base + 0.1 * refinement_offset  # Small refinement
+        fused_vertices = fused_base + 0.1 * refinement_offset  # Small refinement
 
-        return fused_points, implicit_weight, explicit_weight
+        return {
+            'fused_points': fused_vertices,  # (B, N, 3) - for point cloud
+            'fused_vertices': fused_vertices,  # (B, N, 3) - for mesh vertices
+            'implicit_weight': implicit_weight,
+            'explicit_weight': explicit_weight
+        }

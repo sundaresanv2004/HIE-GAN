@@ -18,7 +18,7 @@ class Config:
     VIEWS_PER_ITEM: int = 1
 
     # Training
-    BATCH_SIZE: int = 4
+    BATCH_SIZE: int = 8
     NUM_WORKERS: int = 0
     EPOCHS: int = 100
     LR: float = 1e-4

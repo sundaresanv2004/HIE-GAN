@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F  # Added missing import
 from pytorch3d.loss import chamfer_distance
 from pytorch3d.ops import sample_points_from_meshes
 
@@ -23,8 +24,12 @@ class HIEGANLoss(nn.Module):
 
     def chamfer_loss(self, pred_points, gt_points):
         """Compute Chamfer distance"""
-        loss, _ = chamfer_distance(pred_points, gt_points)
-        return loss
+        # Move to CPU for PyTorch3D operations
+        pred_points_cpu = pred_points.to('cpu')
+        gt_points_cpu = gt_points.to('cpu')
+
+        loss, _ = chamfer_distance(pred_points_cpu, gt_points_cpu)
+        return loss.to(pred_points.device)
 
     def sdf_loss(self, pred_sdf, gt_sdf):
         """L1 loss for SDF values"""
@@ -32,7 +37,10 @@ class HIEGANLoss(nn.Module):
 
     def explicit_loss(self, pred_vertices, gt_mesh):
         """Loss for explicit mesh vertices"""
-        gt_points = sample_points_from_meshes(gt_mesh, num_samples=2048)
+        # Move mesh to CPU for PyTorch3D operations
+        gt_mesh_cpu = gt_mesh.to('cpu')
+        gt_points = sample_points_from_meshes(gt_mesh_cpu, num_samples=2048)
+
         pred_points = pred_vertices  # Assuming same number of points
 
         # If different sizes, sample from predicted vertices
@@ -40,6 +48,9 @@ class HIEGANLoss(nn.Module):
             indices = torch.randint(0, pred_vertices.shape[1],
                                     (gt_points.shape[1],), device=pred_vertices.device)
             pred_points = pred_vertices[:, indices, :]
+
+        # Move gt_points back to same device as pred_points
+        gt_points = gt_points.to(pred_vertices.device)
 
         return self.chamfer_loss(pred_points, gt_points)
 
@@ -57,7 +68,10 @@ class HIEGANLoss(nn.Module):
 
         # Chamfer loss for final fused output (if available)
         if 'fused_points' in outputs:
-            gt_points = sample_points_from_meshes(gt_mesh, num_samples=outputs['fused_points'].shape[1])
+            gt_mesh_cpu = gt_mesh.to('cpu')
+            gt_points = sample_points_from_meshes(gt_mesh_cpu, num_samples=outputs['fused_points'].shape[1])
+            gt_points = gt_points.to(outputs['fused_points'].device)
+
             chamfer_loss = self.chamfer_loss(outputs['fused_points'], gt_points)
             total_loss += self.fusion_weight * chamfer_loss
             loss_dict['fusion_chamfer'] = chamfer_loss
