@@ -1,0 +1,46 @@
+# Do not send local venvs into image
+venv/
+env/
+.venv/
+
+# Ignore local python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ignore OS crap
+.DS_Store
+Thumbs.db
+
+# Ignore IDE
+.vscode/
+.idea/
+
+# Ignore Jupyter checkpoints
+.ipynb_checkpoints/
+
+# Ignore large data during docker build
+data/
+datasets/
+ShapeNetCore/
+ShapeNetCore_*
+processed_data/
+raw_data/
+
+# Ignore logs and model outputs
+outputs/
+logs/
+checkpoints/
+*.pth
+*.pt
+*.obj
+*.ply
+*.stl
+
+# Ignore git metadata
+.git/
+.gitignore
+
+# Notebook outputs
+*.ipynb

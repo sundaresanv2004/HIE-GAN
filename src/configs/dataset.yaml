@@ -1,0 +1,18 @@
+root_dir: "/workspace/data"
+
+classes:
+  - "02954340"
+  - "03001627"
+  - "03636649"
+  - "04379243"
+
+image_channels: 3
+image_size: 224
+
+num_views_per_object: 16   # you will randomly sample 1 view each iteration
+
+load_pointcloud: true
+pointcloud_file: "model_normalized.ply"
+
+explicit_branch:
+  num_vertices: 642     # corresponds to subdivisions=2 sphere

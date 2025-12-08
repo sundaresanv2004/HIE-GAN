@@ -1,0 +1,13 @@
+feature_extractor:
+  type: "resnet18"
+  out_dim: 256
+
+explicit_branch:
+  gcn_hidden_dims: [ 128, 64 ]
+  vertex_feature_dim: 256
+  init_mesh_template: "sphere"   # or "ellipsoid"
+  num_vertices: 642              # sphere resolution (typical for P2M)
+
+use_implicit_branch: false
+use_gan: false
+use_fusion_module: false
