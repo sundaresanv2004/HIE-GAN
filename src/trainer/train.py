@@ -1,7 +1,3 @@
-"""
-HIE-GAN Phase 1 Trainer
-Optimized for Google Colab with detailed logging
-"""
 import os
 import torch
 import torch.nn as nn
@@ -18,6 +14,7 @@ from models.feature_extractor import FeatureExtractor
 from models.explicit_branch import ExplicitDeformer
 from models.init_mesh import create_sphere_mesh
 from losses.chamfer import chamfer_loss
+from losses.regularizers import smoothness_loss, edge_length_loss
 
 
 class Trainer:
@@ -434,12 +431,24 @@ class Trainer:
             img = img.to(self.device, non_blocking=True)
             gt_pc = gt_pc.to(self.device, non_blocking=True)
 
+
             # Forward pass with mixed precision
             if self.args.mixed_precision and self.scaler:
                 with torch.cuda.amp.autocast():
                     feat = self.encoder(img)
                     pred_pc = self.explicit(feat)
-                    loss = chamfer_loss(pred_pc, gt_pc)
+                    
+                    # Losses
+                    cham_loss = chamfer_loss(pred_pc, gt_pc)
+                    
+                    # Get mesh structure for regularizers
+                    # explicit.E is the edge index buffer
+                    pred_mesh = (pred_pc, self.explicit.E)
+                    
+                    smooth_loss = smoothness_loss(pred_mesh, penalty=0.1)
+                    edge_loss = edge_length_loss(pred_mesh, target_length=0.05, penalty=0.1)
+                    
+                    loss = cham_loss + smooth_loss + edge_loss
 
                 self.optimizer.zero_grad(set_to_none=True)
                 self.scaler.scale(loss).backward()
@@ -456,7 +465,16 @@ class Trainer:
             else:
                 feat = self.encoder(img)
                 pred_pc = self.explicit(feat)
-                loss = chamfer_loss(pred_pc, gt_pc)
+                
+                # Losses
+                cham_loss = chamfer_loss(pred_pc, gt_pc)
+                
+                # Regularizers
+                pred_mesh = (pred_pc, self.explicit.E)
+                smooth_loss = smoothness_loss(pred_mesh, penalty=0.1)
+                edge_loss = edge_length_loss(pred_mesh, target_length=0.05, penalty=0.1)
+                
+                loss = cham_loss + smooth_loss + edge_loss
 
                 self.optimizer.zero_grad(set_to_none=True)
                 loss.backward()

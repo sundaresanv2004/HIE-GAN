@@ -1,4 +1,4 @@
-root_dir: "/workspace/data"
+root_dir: "data/ShapeNetCore_4"
 
 classes:
   - "02954340"

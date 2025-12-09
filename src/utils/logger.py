@@ -18,7 +18,21 @@ def setup_logger(log_dir, filename, quiet=False):
 
     # Console handler
     if not quiet:
-        ch = logging.StreamHandler()
+        from tqdm import tqdm
+        
+        class TqdmLoggingHandler(logging.Handler):
+            def __init__(self, level=logging.NOTSET):
+                super().__init__(level)
+
+            def emit(self, record):
+                try:
+                    msg = self.format(record)
+                    tqdm.write(msg)
+                    self.flush()
+                except Exception:
+                    self.handleError(record)
+
+        ch = TqdmLoggingHandler()
         ch.setLevel(logging.INFO)
         ch_formatter = logging.Formatter(
             "%(asctime)s | %(message)s",
