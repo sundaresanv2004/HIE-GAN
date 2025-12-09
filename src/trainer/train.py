@@ -280,18 +280,20 @@ class Trainer:
 
     def _build_optimizer(self):
         """Build optimizer"""
-        weight_decay = self.args.weight_decay if self.args.weight_decay else 0.0
+        # Ensure lr is float (in case YAML has it as string)
+        lr = float(self.train_cfg["optimizer"]["lr"])
+        weight_decay = float(self.args.weight_decay) if self.args.weight_decay else 0.0
 
         self.optimizer = torch.optim.Adam(
             list(self.encoder.parameters()) + list(self.explicit.parameters()),
-            lr=self.train_cfg["optimizer"]["lr"],
+            lr=lr,
             weight_decay=weight_decay
         )
 
         if weight_decay > 0:
-            self.logger.info(f"Optimizer: Adam with weight_decay={weight_decay}")
+            self.logger.info(f"Optimizer: Adam (lr={lr}, weight_decay={weight_decay})")
         else:
-            self.logger.info("Optimizer: Adam")
+            self.logger.info(f"Optimizer: Adam (lr={lr})")
 
     def _load_checkpoint(self, checkpoint_path):
         """Load checkpoint from path"""
