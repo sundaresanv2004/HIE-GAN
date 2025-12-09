@@ -1,6 +1,6 @@
 """
 HIE-GAN Phase 1 Trainer
-Clean training implementation without argument parsing
+Clean training implementation with proper device handling, checkpointing, and logging
 """
 import os
 import torch
@@ -21,6 +21,8 @@ from losses.chamfer import chamfer_loss
 
 
 class Trainer:
+    """Main trainer class for HIE-GAN Phase 1"""
+
     def __init__(self, args):
         """Initialize trainer with parsed arguments"""
         self.args = args
@@ -69,6 +71,7 @@ class Trainer:
         if self.args.deterministic:
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
+            self.logger.info("✓ Deterministic mode enabled")
 
     def _load_configs(self):
         """Load YAML configurations"""
@@ -90,6 +93,8 @@ class Trainer:
             self.train_cfg["logging"]["log_every_n_steps"] = self.args.log_every
         if self.args.data_root:
             self.dataset_cfg["root_dir"] = self.args.data_root
+        if self.args.log_dir:
+            self.train_cfg["logging"]["log_dir"] = self.args.log_dir
 
     def _setup_directories(self):
         """Setup experiment and checkpoint directories"""
@@ -128,18 +133,20 @@ class Trainer:
             if torch.cuda.is_available():
                 device = torch.device("cuda")
                 if not self.args.quiet:
-                    self.logger.info(f"✓ Auto-selected GPU: {torch.cuda.get_device_name(0)}")
+                    gpu_name = torch.cuda.get_device_name(0)
+                    print(f"✓ Auto-selected GPU: {gpu_name}")
             else:
                 device = torch.device("cpu")
                 if not self.args.quiet:
-                    self.logger.info("⚠ No GPU available, using CPU")
+                    print("⚠ No GPU available, using CPU")
         else:
             device = torch.device(self.args.device)
             if not self.args.quiet:
                 if device.type == "cuda":
-                    self.logger.info(f"✓ Using GPU: {torch.cuda.get_device_name(device)}")
+                    gpu_name = torch.cuda.get_device_name(device)
+                    print(f"✓ Using GPU: {gpu_name}")
                 else:
-                    self.logger.info(f"✓ Using device: {device}")
+                    print(f"✓ Using device: {device}")
 
         return device
 
@@ -163,6 +170,8 @@ class Trainer:
             self.logger.info("✓ Mixed precision enabled")
         if self.args.grad_clip:
             self.logger.info(f"✓ Gradient clipping: {self.args.grad_clip}")
+        if self.args.compile:
+            self.logger.info("✓ Model compilation enabled")
         if self.args.debug:
             self.logger.info("⚠ DEBUG MODE ACTIVE")
         if self.args.seed is not None:
@@ -204,7 +213,10 @@ class Trainer:
             self.logger.info(f"Dataset size: {len(train_dataset)}")
 
         # Create dataloaders
-        pin_memory = self.args.pin_memory if self.args.pin_memory is not None else (self.device.type == "cuda")
+        if self.args.pin_memory is not None:
+            pin_memory = self.args.pin_memory
+        else:
+            pin_memory = (self.device.type == "cuda")
 
         self.train_loader = DataLoader(
             train_dataset,
@@ -257,20 +269,33 @@ class Trainer:
 
         # Compile models if requested (PyTorch 2.0+)
         if self.args.compile:
-            self.logger.info("Compiling models with torch.compile...")
-            self.encoder = torch.compile(self.encoder)
-            self.explicit = torch.compile(self.explicit)
+            try:
+                self.logger.info("Compiling models with torch.compile...")
+                self.encoder = torch.compile(self.encoder)
+                self.explicit = torch.compile(self.explicit)
+                self.logger.info("✓ Model compilation successful")
+            except Exception as e:
+                self.logger.warning(f"⚠ Model compilation failed: {e}")
+                self.logger.warning("Continuing without compilation")
 
     def _build_optimizer(self):
         """Build optimizer"""
+        weight_decay = self.args.weight_decay if self.args.weight_decay else 0.0
+
         self.optimizer = torch.optim.Adam(
             list(self.encoder.parameters()) + list(self.explicit.parameters()),
             lr=self.train_cfg["optimizer"]["lr"],
-            weight_decay=self.args.weight_decay or 0.0
+            weight_decay=weight_decay
         )
+
+        if weight_decay > 0:
+            self.logger.info(f"Optimizer: Adam with weight_decay={weight_decay}")
+        else:
+            self.logger.info("Optimizer: Adam")
 
     def _load_checkpoint(self, checkpoint_path):
         """Load checkpoint from path"""
+        self.logger.info(f"Loading checkpoint: {checkpoint_path}")
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
 
         self.encoder.load_state_dict(checkpoint["encoder_state_dict"])
@@ -290,14 +315,12 @@ class Trainer:
         """Handle checkpoint loading based on mode"""
         if self.args.checkpoint:
             # Force load specific checkpoint
-            self.logger.info(f"Loading checkpoint: {self.args.checkpoint}")
             self._load_checkpoint(self.args.checkpoint)
 
         elif self.args.mode == "resume":
             # Force resume from latest
             latest_ckpt = self.ckpt_dir / "checkpoint_latest.pth"
             if latest_ckpt.exists():
-                self.logger.info(f"Resuming from: {latest_ckpt}")
                 self._load_checkpoint(latest_ckpt)
             else:
                 self.logger.error(f"❌ No checkpoint found at {latest_ckpt}")
@@ -349,6 +372,8 @@ class Trainer:
         if len(all_checkpoints) > self.args.keep_last:
             for old_ckpt in all_checkpoints[:-self.args.keep_last]:
                 old_ckpt.unlink()
+                if not self.args.quiet:
+                    self.logger.info(f"  🗑️  Removed old checkpoint: {old_ckpt.name}")
 
     def train_epoch(self, epoch):
         """Train single epoch"""
@@ -439,11 +464,11 @@ class Trainer:
         """Main training loop"""
         # Dry run check
         if self.args.dry_run:
-            self.logger.info("Dry run mode - initializing only")
+            self.logger.info("🔍 Dry run mode - initializing only")
             self._build_dataset()
             self._build_models()
             self._build_optimizer()
-            self.logger.info("✓ Dry run complete")
+            self.logger.info("✓ Dry run complete - all components initialized successfully")
             return
 
         # Build all components
@@ -487,7 +512,23 @@ class Trainer:
             self._save_checkpoint(epoch, avg_loss, False)
             self.logger.info("✓ Emergency checkpoint saved")
 
+        except Exception as e:
+            self.logger.error(f"❌ Training failed with error: {e}")
+            self.logger.info("Saving emergency checkpoint...")
+            self._save_checkpoint(epoch, avg_loss, False)
+            self.logger.info("✓ Emergency checkpoint saved")
+            raise
+
         self.logger.info("=" * 70)
         self.logger.info("Training finished!")
         self.logger.info(f"Best loss: {self.best_loss:.6f}")
+        self.logger.info(f"Checkpoints saved to: {self.ckpt_dir}")
+        self.logger.info(f"Logs saved to: {self.exp_dir}")
         self.logger.info("=" * 70)
+
+
+# Backward compatibility wrapper
+def train_phase1(args):
+    """Wrapper function for backward compatibility"""
+    trainer = Trainer(args)
+    trainer.run()
