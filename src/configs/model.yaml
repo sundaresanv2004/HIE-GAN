@@ -1,4 +1,4 @@
-device: "cuda"     # automatic fallback to CPU if no GPU
+device: "cuda:0"     # automatic fallback to CPU if no GPU
 
 feature_extractor:
   type: "resnet18"

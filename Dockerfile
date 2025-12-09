@@ -1,5 +1,5 @@
 # BASE IMAGE WITH CUDA + PYTORCH
-FROM pytorch/pytorch:2.4.0-cuda11.8-cudnn9-runtime
+FROM pytorch/pytorch:2.4.0-cuda12.1-cudnn9-runtime
 
 # SYSTEM SETUP
 ENV DEBIAN_FRONTEND=noninteractive
@@ -26,9 +26,10 @@ WORKDIR /workspace
 COPY requirements.txt /workspace/
 RUN uv pip install --system -r requirements.txt
 
-# INSTALL torch-geometric (CORRECTED)
-RUN uv pip install --system torch-geometric \
-    -f https://data.pyg.org/whl/torch-2.4.0+cu118.html
+# INSTALL torch-geometric with ALL dependencies (CUDA 12.1)
+RUN uv pip install --system torch-scatter torch-sparse torch-cluster torch-spline-conv \
+    -f https://data.pyg.org/whl/torch-2.4.0+cu121.html && \
+    uv pip install --system torch-geometric
 
 # COPY PROJECT FILES
 COPY . /workspace
