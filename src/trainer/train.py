@@ -1,12 +1,12 @@
 """
 HIE-GAN Phase 1 Trainer
-Clean training implementation with proper device handling, checkpointing, and logging
+Optimized for Google Colab with detailed logging
 """
 import os
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
-from tqdm import tqdm
+from tqdm.auto import tqdm  # Changed for Colab compatibility
 from pathlib import Path
 import random
 import numpy as np
@@ -71,26 +71,29 @@ class Trainer:
         if self.args.deterministic:
             torch.backends.cudnn.deterministic = True
             torch.backends.cudnn.benchmark = False
-            self.logger.info("✓ Deterministic mode enabled")
 
     def _load_configs(self):
         """Load YAML configurations"""
         return load_configs(config_dir=self.args.config_dir)
 
     def _apply_overrides(self):
-        """Apply CLI argument overrides to configs"""
+        """Apply CLI argument overrides to configs with type safety"""
         if self.args.epochs:
-            self.train_cfg["epochs"] = self.args.epochs
+            self.train_cfg["epochs"] = int(self.args.epochs)
         if self.args.batch_size:
-            self.train_cfg["batch_size"] = self.args.batch_size
+            self.train_cfg["batch_size"] = int(self.args.batch_size)
         if self.args.lr:
-            self.train_cfg["optimizer"]["lr"] = self.args.lr
+            self.train_cfg["optimizer"]["lr"] = float(self.args.lr)
+        else:
+            # Ensure lr from YAML is float
+            self.train_cfg["optimizer"]["lr"] = float(self.train_cfg["optimizer"]["lr"])
+
         if self.args.num_workers is not None:
-            self.train_cfg["num_workers"] = self.args.num_workers
+            self.train_cfg["num_workers"] = int(self.args.num_workers)
         if self.args.save_every:
-            self.train_cfg["checkpoints"]["save_every"] = self.args.save_every
+            self.train_cfg["checkpoints"]["save_every"] = int(self.args.save_every)
         if self.args.log_every:
-            self.train_cfg["logging"]["log_every_n_steps"] = self.args.log_every
+            self.train_cfg["logging"]["log_every_n_steps"] = int(self.args.log_every)
         if self.args.data_root:
             self.dataset_cfg["root_dir"] = self.args.data_root
         if self.args.log_dir:
@@ -134,7 +137,8 @@ class Trainer:
                 device = torch.device("cuda")
                 if not self.args.quiet:
                     gpu_name = torch.cuda.get_device_name(0)
-                    print(f"✓ Auto-selected GPU: {gpu_name}")
+                    gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
+                    print(f"✓ Auto-selected GPU: {gpu_name} ({gpu_memory:.1f}GB)")
             else:
                 device = torch.device("cpu")
                 if not self.args.quiet:
@@ -180,8 +184,12 @@ class Trainer:
         self.logger.info("=" * 70)
 
     def _build_dataset(self):
-        """Build train and validation datasets"""
-        self.logger.info("Loading dataset...")
+        """Build train and validation datasets with detailed logging"""
+        self.logger.info("=" * 70)
+        self.logger.info("Loading Dataset")
+        self.logger.info("=" * 70)
+        self.logger.info(f"Dataset root: {self.dataset_cfg['root_dir']}")
+        self.logger.info(f"Classes: {', '.join(self.dataset_cfg['classes'])}")
 
         dataset = ShapeNetDataset(
             root_dir=self.dataset_cfg["root_dir"],
@@ -190,13 +198,26 @@ class Trainer:
             image_size=self.dataset_cfg["image"]["size"],
         )
 
+        total_objects = len(dataset)
+        self.logger.info(f"Total objects found: {total_objects}")
+
         # Limit dataset size for debugging/testing
         if self.args.debug:
             dataset.object_paths = dataset.object_paths[:32]
-            self.logger.info(f"⚠ DEBUG: Using {len(dataset)} samples")
+            self.logger.info(f"⚠ DEBUG: Limited to {len(dataset)} samples")
         elif self.args.num_samples:
             dataset.object_paths = dataset.object_paths[:self.args.num_samples]
-            self.logger.info(f"Limited to {len(dataset)} samples")
+            self.logger.info(f"⚠ Limited to {len(dataset)} samples")
+
+        # Calculate batches
+        batch_size = self.train_cfg["batch_size"]
+        num_batches = len(dataset) // batch_size
+        if len(dataset) % batch_size != 0:
+            num_batches += 1
+
+        self.logger.info(f"Batch size: {batch_size}")
+        self.logger.info(f"Total batches per epoch: {num_batches}")
+        self.logger.info(f"Samples per epoch: {len(dataset)}")
 
         # Split into train/val if needed
         if self.args.val_split and self.args.val_split > 0:
@@ -206,11 +227,19 @@ class Trainer:
                 dataset, [train_size, val_size],
                 generator=torch.Generator().manual_seed(self.args.seed or 42)
             )
-            self.logger.info(f"Train: {len(train_dataset)} | Val: {len(val_dataset)}")
+            self.logger.info(f"Train samples: {len(train_dataset)} | Val samples: {len(val_dataset)}")
+            train_batches = len(train_dataset) // batch_size
+            val_batches = len(val_dataset) // batch_size
+            self.logger.info(f"Train batches: {train_batches} | Val batches: {val_batches}")
         else:
             train_dataset = dataset
             val_dataset = None
-            self.logger.info(f"Dataset size: {len(train_dataset)}")
+            self.logger.info("No validation split")
+
+        # Warning if very few batches
+        if num_batches < 10:
+            self.logger.warning(f"⚠ Only {num_batches} batches per epoch!")
+            self.logger.warning(f"⚠ Consider decreasing batch size or adding more data")
 
         # Create dataloaders
         if self.args.pin_memory is not None:
@@ -220,7 +249,7 @@ class Trainer:
 
         self.train_loader = DataLoader(
             train_dataset,
-            batch_size=self.train_cfg["batch_size"],
+            batch_size=batch_size,
             shuffle=True,
             num_workers=self.train_cfg["num_workers"],
             pin_memory=pin_memory,
@@ -230,12 +259,14 @@ class Trainer:
         if val_dataset:
             self.val_loader = DataLoader(
                 val_dataset,
-                batch_size=self.train_cfg["batch_size"],
+                batch_size=batch_size,
                 shuffle=False,
                 num_workers=self.train_cfg["num_workers"],
                 pin_memory=pin_memory,
                 persistent_workers=(self.train_cfg["num_workers"] > 0),
             )
+
+        self.logger.info("=" * 70)
 
     def _build_models(self):
         """Build and initialize models"""
@@ -279,8 +310,7 @@ class Trainer:
                 self.logger.warning("Continuing without compilation")
 
     def _build_optimizer(self):
-        """Build optimizer"""
-        # Ensure lr is float (in case YAML has it as string)
+        """Build optimizer with type safety"""
         lr = float(self.train_cfg["optimizer"]["lr"])
         weight_decay = float(self.args.weight_decay) if self.args.weight_decay else 0.0
 
@@ -378,21 +408,23 @@ class Trainer:
                     self.logger.info(f"  🗑️  Removed old checkpoint: {old_ckpt.name}")
 
     def train_epoch(self, epoch):
-        """Train single epoch"""
+        """Train single epoch - Colab optimized"""
         self.encoder.train()
         self.explicit.train()
 
         epoch_loss = 0.0
         num_batches = len(self.train_loader)
 
-        # Setup progress bar
+        # Setup progress bar (Colab compatible)
         if not self.args.no_tqdm:
             pbar = tqdm(
                 self.train_loader,
                 desc=f"Epoch {epoch + 1}/{self.train_cfg['epochs']}",
+                total=num_batches,
+                leave=False,  # Don't leave bar after completion (fixes mess)
                 ncols=100,
-                leave=True,
-                disable=self.args.quiet
+                disable=self.args.quiet,
+                position=0  # Single position for Colab
             )
         else:
             pbar = self.train_loader
@@ -447,7 +479,7 @@ class Trainer:
 
             # Periodic logging
             log_every = self.train_cfg["logging"]["log_every_n_steps"]
-            if step % log_every == 0:
+            if step % log_every == 0 and step > 0:
                 self.logger.info(
                     f"Epoch {epoch + 1}/{self.train_cfg['epochs']} | "
                     f"Step {step}/{num_batches} | Loss: {loss_val:.6f}"
@@ -517,8 +549,11 @@ class Trainer:
         except Exception as e:
             self.logger.error(f"❌ Training failed with error: {e}")
             self.logger.info("Saving emergency checkpoint...")
-            self._save_checkpoint(epoch, avg_loss, False)
-            self.logger.info("✓ Emergency checkpoint saved")
+            try:
+                self._save_checkpoint(epoch, avg_loss, False)
+                self.logger.info("✓ Emergency checkpoint saved")
+            except:
+                pass
             raise
 
         self.logger.info("=" * 70)
