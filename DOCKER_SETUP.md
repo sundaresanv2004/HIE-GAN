@@ -14,29 +14,6 @@
 
 ---
 
-# macOS Setup (Apple Silicon or Intel)
-
-> Macs cannot run CUDA, but they can build CUDA images successfully.
-
-## Build Image
-
-```
-docker build --platform=linux/amd64 -t hiegan-dev .
-```
-
-## Run Dev Container (Mac)
-
-```
-docker run --platform=linux/amd64 -it \
-    -v $(pwd):/workspace \
-    hiegan-dev
-```
-
-- You get full development environment
-- CUDA will be unavailable (expected)
-
----
-
 # Linux GPU Setup (CUDA Machines)
 
 ## Verify NVIDIA Driver

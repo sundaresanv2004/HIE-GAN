@@ -1,5 +1,7 @@
-batch_size: 2
+batch_size: 4
 num_workers: 4
+
+epochs: 50
 
 optimizer:
   type: "adam"
@@ -8,15 +10,19 @@ optimizer:
 
 scheduler:
   use_scheduler: false
-
-epochs: 50
-log_every: 50
-save_every: 1
+  step_size: 20
+  gamma: 0.1
 
 loss:
   chamfer_weight: 1.0
-  sdf_weight: 0.0
-  gan_weight: 0.0
 
-device: "cuda"
-checkpoint_dir: "outputs/checkpoints"
+logging:
+  log_dir: "outputs/logs"
+  log_filename: "phase1_train.log"
+  csv_filename: "phase1_train.csv"
+  log_every_n_steps: 10
+
+checkpoints:
+  dir: "outputs/checkpoints"
+  filename: "phase1_explicit.pt"
+  resume: true

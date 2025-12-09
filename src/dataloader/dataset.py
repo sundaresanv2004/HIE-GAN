@@ -1,25 +1,35 @@
 import os
 import random
+import numpy as np
+import torch
 from PIL import Image
 import open3d as o3d
-import torch
 from torch.utils.data import Dataset
+from torchvision import transforms
 
 
 class ShapeNetDataset(Dataset):
-    def __init__(self, root_dir, transform=None):
+    def __init__(self, root_dir, classes, pc_filename, image_size):
         self.root_dir = root_dir
-        self.transform = transform
+        self.pc_filename = pc_filename
+        self.image_size = image_size
 
-        # scan all object folders across classes
+        # torchvision transforms
+        self.transform = transforms.Compose([
+            transforms.Resize((image_size, image_size)),
+            transforms.ToTensor()
+        ])
+
+        # gather all object paths from selected classes
         self.object_paths = []
-        for cls in os.listdir(root_dir):
-            cls_path = os.path.join(root_dir, cls)
-            if not os.path.isdir(cls_path): continue
-            for obj in os.listdir(cls_path):
-                obj_path = os.path.join(cls_path, obj)
-                if os.path.isdir(obj_path):
-                    self.object_paths.append(obj_path)
+        for cls in classes:
+            cpath = os.path.join(root_dir, cls)
+            if not os.path.exists(cpath):
+                continue
+            for obj in os.listdir(cpath):
+                objpath = os.path.join(cpath, obj)
+                if os.path.isdir(objpath):
+                    self.object_paths.append(objpath)
 
     def __len__(self):
         return len(self.object_paths)
@@ -27,18 +37,15 @@ class ShapeNetDataset(Dataset):
     def __getitem__(self, idx):
         obj_path = self.object_paths[idx]
 
-        # -------- image ----------
+        # load random single image
         img_dir = os.path.join(obj_path, "images")
-        img_files = os.listdir(img_dir)
-        img_file = random.choice(img_files)
+        img_file = random.choice(os.listdir(img_dir))
         img = Image.open(os.path.join(img_dir, img_file)).convert("RGB")
+        img = self.transform(img)
 
-        if self.transform:
-            img = self.transform(img)
-
-        # -------- GT POINT CLOUD ----------
-        ply_file = os.path.join(obj_path, "model_normalized.ply")
+        # load GT point cloud
+        ply_file = os.path.join(obj_path, self.pc_filename)
         cloud = o3d.io.read_point_cloud(ply_file)
-        pc = torch.tensor(np.asarray(cloud.points), dtype=torch.float32)
+        gt = torch.tensor(np.asarray(cloud.points), dtype=torch.float32)
 
-        return img, pc
+        return img, gt
