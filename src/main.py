@@ -96,7 +96,7 @@ def parse_args():
     ckpt_group = parser.add_argument_group("Checkpointing")
     ckpt_group.add_argument(
         "--checkpoint", "--resume-from", type=str, default=None,
-        dest="checkpoint", help="Specific checkpoint path to load"
+        dest="checkpoint", help="Specific checkpoint path (file or output directory) to load"
     )
     ckpt_group.add_argument(
         "--save-every", type=int, default=None,

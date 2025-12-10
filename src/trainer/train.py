@@ -6,6 +6,8 @@ from tqdm.auto import tqdm  # Changed for Colab compatibility
 from pathlib import Path
 import random
 import numpy as np
+import datetime
+import json
 
 from utils.config import load_configs
 from utils.logger import setup_logger, CSVLogger, MetricsLogger
@@ -98,12 +100,23 @@ class Trainer:
 
     def _setup_directories(self):
         """Setup experiment and checkpoint directories"""
+        # Get current timestamp
+        now = datetime.datetime.now()
+        date_str = now.strftime("%d-%m-%Y")
+        time_str = now.strftime("%H-%M-%S")
+        
+        # Base output directory: output/dd-mm-yyyy/timestamp
+        base_dir = Path("output") / date_str / time_str
+        
         if self.args.exp_name:
-            exp_dir = Path(self.train_cfg["logging"]["log_dir"]) / self.args.exp_name
-            ckpt_dir = Path(self.train_cfg["checkpoints"]["dir"]) / self.args.exp_name
-        else:
-            exp_dir = Path(self.train_cfg["logging"]["log_dir"])
-            ckpt_dir = Path(self.train_cfg["checkpoints"]["dir"])
+             base_dir = base_dir / self.args.exp_name
+
+        # Update log dir in config so other components know where to log
+        self.train_cfg["logging"]["log_dir"] = str(base_dir)
+        self.train_cfg["checkpoints"]["dir"] = str(base_dir / "checkpoints")
+
+        exp_dir = base_dir
+        ckpt_dir = base_dir / "checkpoints"
 
         exp_dir.mkdir(parents=True, exist_ok=True)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -344,7 +357,18 @@ class Trainer:
         """Handle checkpoint loading based on mode"""
         if self.args.checkpoint:
             # Force load specific checkpoint
-            self._load_checkpoint(self.args.checkpoint)
+            ckpt_path = Path(self.args.checkpoint)
+            if ckpt_path.is_dir():
+                # If directory provided, look for latest checkpoint
+                ckpt_path = ckpt_path / "checkpoints" / "checkpoint_latest.pth"
+                if not ckpt_path.exists():
+                     # Try looking directly in the dir
+                     ckpt_path = Path(self.args.checkpoint) / "checkpoint_latest.pth"
+            
+            if not ckpt_path.exists():
+                raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+                
+            self._load_checkpoint(ckpt_path)
 
         elif self.args.mode == "resume":
             # Force resume from latest
@@ -395,6 +419,35 @@ class Trainer:
             best_path = self.ckpt_dir / "checkpoint_best.pth"
             torch.save(checkpoint, best_path)
             self.logger.info(f"  💾 Best checkpoint saved (loss: {loss:.6f})")
+
+        # Save metadata
+        metadata = {
+            "last_epoch": epoch,
+            "best_epoch": -1,  # You might want to track this in self
+            "last_loss": loss,
+            "best_loss": self.best_loss,
+            "timestamp": datetime.datetime.now().isoformat()
+        }
+        
+        # If this is best, update best epoch
+        if is_best:
+            metadata["best_epoch"] = epoch
+            
+        # Try to read existing metadata to preserve history if needed, 
+        # but for now we overwrite with current state
+        meta_path = self.exp_dir / "training_metadata.json"
+        
+        # If exists, read to keep best_epoch if we are not currently best
+        if meta_path.exists() and not is_best:
+            try:
+                with open(meta_path, 'r') as f:
+                    old_meta = json.load(f)
+                    metadata["best_epoch"] = old_meta.get("best_epoch", -1)
+            except:
+                pass
+
+        with open(meta_path, 'w') as f:
+            json.dump(metadata, f, indent=4)
 
         # Rotate old checkpoints
         all_checkpoints = sorted(self.ckpt_dir.glob("checkpoint_epoch_*.pth"))
