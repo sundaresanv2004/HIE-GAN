@@ -1,4 +1,4 @@
-batch_size: 4
+batch_size: 64
 num_workers: 4
 
 epochs: 50
@@ -17,12 +17,12 @@ loss:
   chamfer_weight: 1.0
 
 logging:
-  log_dir: "outputs/logs"
+  log_dir: "output/logs"
   log_filename: "phase1_train.log"
   csv_filename: "phase1_train.csv"
   log_every_n_steps: 10
 
 checkpoints:
-  dir: "outputs/checkpoints"
+  dir: "output/checkpoints"
   filename: "phase1_explicit.pt"
   resume: true

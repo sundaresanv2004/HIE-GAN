@@ -45,7 +45,7 @@ docker build -t hiegan-dev .
 ## Run GPU Container
 
 ```
-docker run --gpus all -it \
+docker run --gpus all --shm-size=8g -it \
     -v $(pwd):/workspace \
     hiegan-dev
 ```
@@ -86,7 +86,7 @@ docker build -t hiegan-dev .
 Run with GPU:
 
 ```
-docker run --gpus all -it \
+docker run --gpus all --shm-size=8g -it \
     -v $(pwd):/workspace \
     hiegan-dev
 ```

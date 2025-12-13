@@ -5,6 +5,7 @@ Handles all CLI argument parsing and delegates to trainer
 """
 import argparse
 import sys
+import torch
 from pathlib import Path
 
 # Add src directory to path for imports
@@ -21,10 +22,8 @@ def parse_args():
     mode_group = parser.add_argument_group("Training Modes")
     mode_group.add_argument(
         "--mode", type=str, default="train",
-        choices=["train", "resume", "scratch"],
-        help="'train': auto-resume if checkpoint exists | "
-             "'resume': force resume from checkpoint | "
-             "'scratch': start fresh training"
+        choices=["train", "resume", "scratch", "generate", "plot"],
+        help="Execution mode: train/resume/scratch (training), generate (inference), plot (visualization)"
     )
 
     # ===== Config Files =====
@@ -115,7 +114,7 @@ def parse_args():
     log_group = parser.add_argument_group("Logging")
     log_group.add_argument(
         "--exp-name", type=str, default=None,
-        help="Experiment name for organizing outputs"
+        help="Experiment name for organizing output"
     )
     log_group.add_argument(
         "--log-dir", type=str, default=None,
@@ -142,7 +141,15 @@ def parse_args():
     )
     data_group.add_argument(
         "--num-samples", type=int, default=None,
-        help="Limit dataset to N samples (for testing)"
+        help="Limit dataset to N samples (for testing/generation)"
+    )
+    data_group.add_argument(
+        "--image", type=str, default=None,
+        help="Path to single image for 'generate' mode"
+    )
+    data_group.add_argument(
+        "--output-dir", type=str, default=None,
+        help="Explicit output directory for generation results"
     )
 
     # ===== Debugging and Testing =====
@@ -175,18 +182,121 @@ def parse_args():
         help="Run validation every N epochs"
     )
 
+    # ===== Post-Training Automation =====
+    post_group = parser.add_argument_group("Post-Training Automation")
+    post_group.add_argument(
+        "--generate-graph", action="store_true", default=True,
+        help="Generate training graphs (Loss vs Epoch) after training"
+    )
+    post_group.add_argument(
+        "--generate-model", action="store_true", default=True,
+        help="Generate 3D models for classes after training"
+    )
+
     return parser.parse_args()
 
 
 if __name__ == "__main__":
-    # Import here to avoid issues
     from trainer.train import Trainer
+    from utils.plotter import plot_training_logs
+    from inference.generate import generate_batch, generate_single, load_model
 
-    # Parse arguments
     args = parse_args()
 
-    # Initialize trainer with args
-    trainer = Trainer(args)
+    if args.mode == "plot":
+        # Plotting Mode
+        # Determine CSV path
+        if args.log_dir:
+            path = Path(args.log_dir)
+            if path.is_file():
+                if path.suffix == ".log":
+                     # Likely user pointed to text log, try to find csv sibling
+                     csv_candidate = path.with_suffix(".csv")
+                     if csv_candidate.exists():
+                         print(f"ℹ Auto-correcting {path.name} -> {csv_candidate.name}")
+                         csv_path = csv_candidate
+                     else:
+                         csv_path = path # Let it fail or user named it weirdly
+                else:
+                    csv_path = path
+            elif path.is_dir():
+                # Look for common csv names
+                candidates = ["phase1_train.csv", "training_log.csv"]
+                found = False
+                for c in candidates:
+                    p = path / c
+                    if p.exists():
+                        csv_path = p
+                        found = True
+                        break
+                if not found:
+                    print(f"❌ Could not find CSV log in {path}")
+                    print(f"   Checked: {candidates}")
+                    sys.exit(1)
+            else:
+                print(f"❌ Path not found: {path}")
+                sys.exit(1)
+        else:
+            # Default location
+            csv_path = Path("output/latest/phase1_train.csv")
+            if not csv_path.exists():
+                 csv_path = Path("output/latest/training_log.csv")
+        
+        if csv_path.exists():
+             print(f"Plotting log: {csv_path}")
+             plot_training_logs(csv_path)
+        else:
+             print(f"❌ File not found: {csv_path}")
+             print("Usage: python src/main.py --mode plot --log-dir path/to/phase1_train.csv")
 
-    # Start training
-    trainer.run()
+    elif args.mode == "generate":
+        # Generation Mode
+        if not args.checkpoint:
+            print("❌ --checkpoint is required for generation--")
+            sys.exit(1)
+            
+        print(f"Loading model from {args.checkpoint}...")
+        
+        # Setup device for generation
+        if args.device == "auto":
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        else:
+            device = torch.device(args.device)
+
+        # Load model components
+        # We need config dir. 
+        # Note: generate.py's load_model expects these params
+        encoder, explicit, model_cfg = load_model(args.config_dir, args.checkpoint, device)
+        
+        # Determine base directory from checkpoint path
+        ckpt_path = Path(args.checkpoint)
+        if ckpt_path.parent.name == "checkpoints":
+             base_exp_dir = ckpt_path.parent.parent
+        else:
+             base_exp_dir = ckpt_path.parent
+
+        if args.output_dir:
+            out_dir = Path(args.output_dir)
+        elif args.exp_name:
+            # Treat exp_name as subdirectory name within the experiment folder
+            out_dir = base_exp_dir / args.exp_name
+        else:
+            # Default
+            out_dir = base_exp_dir / "generated_samples"
+        
+        print(f"Output directory: {out_dir}")
+        
+        if args.image:
+            # Single Image
+            print(f"Generating single sample from {args.image}...")
+            path = generate_single(args.image, out_dir, encoder, explicit, device, model_cfg)
+            print(f"✓ Saved: {path}")
+        else:
+            # Batch
+            print(f"Generating batch samples...")
+            generate_batch(args.config_dir, out_dir, encoder, explicit, device, model_cfg, num_samples=args.num_samples or 20)
+
+    else:
+        # Training Modes (train, resume, scratch)
+        trainer = Trainer(args)
+        trainer.run()

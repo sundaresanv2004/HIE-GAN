@@ -12,9 +12,21 @@ class ExplicitDeformer(nn.Module):
         self.register_parameter("V", nn.Parameter(V0))
         self.register_buffer("E", E0)
 
-        self.conv1 = GCNConv(3 + feature_dim, hidden_dims[0])
-        self.conv2 = GCNConv(hidden_dims[0], hidden_dims[1])
-        self.conv3 = GCNConv(hidden_dims[1], 3)
+        layers = []
+        
+        # Input layer
+        input_dim = 3 + feature_dim
+        
+        # Hidden layers
+        for h_dim in hidden_dims:
+            layers.append(GCNConv(input_dim, h_dim))
+            input_dim = h_dim
+            
+        self.gcn_layers = nn.ModuleList(layers)
+        
+        # Output layer (always outputs 3 for displacement)
+        self.final_layer = GCNConv(input_dim, 3)
+        
         self.relu = nn.ReLU()
 
     def forward(self, img_feat):
@@ -38,12 +50,18 @@ class ExplicitDeformer(nn.Module):
         X = X.reshape(B * N, 3 + F)  # Flatten for GCN
 
         # Expand edge indices for batch processing
-        E = self.E
+        num_edges = self.E.shape[1]
+        E = self.E.repeat(1, B)
+        # Create offsets for each batch item: [0, 0, ..., N, N, ...]
+        offset = torch.arange(B, device=self.E.device).repeat_interleave(num_edges) * N
+        E = E + offset.unsqueeze(0)
 
         # GCN layers with activations
-        X = self.relu(self.conv1(X, E))
-        X = self.relu(self.conv2(X, E))
-        dV = self.conv3(X, E)  # Predict vertex displacement
+        for layer in self.gcn_layers:
+            X = self.relu(layer(X, E))
+            
+        # Final layer
+        dV = self.final_layer(X, E)  # Predict vertex displacement
 
         # Reshape back to batch format
         dV = dV.reshape(B, N, 3)

@@ -18,17 +18,33 @@ from models.init_mesh import create_sphere_mesh
 from losses.chamfer import chamfer_loss
 from losses.regularizers import smoothness_loss, edge_length_loss
 
+from utils.checkpoint import CheckpointManager
+from utils.setup import EnvironmentSetup
+from utils.plotter import plot_training_logs
+from inference.generate import generate_batch
+
 
 class Trainer:
-    """Main trainer class for HIE-GAN Phase 1"""
+    """
+    Main trainer class for HIE-GAN Phase 1.
+    
+    This class handles the training loop, validation, logging, and model management.
+    It uses helper classes for checkpointing and environment setup to keep the
+    core logic clean.
+    """
 
     def __init__(self, args):
-        """Initialize trainer with parsed arguments"""
+        """
+        Initialize trainer with parsed arguments.
+        
+        Args:
+            args: Parsed command line arguments containing training options.
+        """
         self.args = args
 
         # Set random seeds for reproducibility
         if args.seed is not None:
-            self._set_seed(args.seed)
+            EnvironmentSetup.set_seed(args.seed, args.deterministic)
 
         # Load configurations
         self.dataset_cfg, self.model_cfg, self.train_cfg = self._load_configs()
@@ -37,16 +53,23 @@ class Trainer:
         self._apply_overrides()
 
         # Setup directories
-        self.exp_dir, self.ckpt_dir = self._setup_directories()
+        self.exp_dir, self.ckpt_dir = EnvironmentSetup.setup_directories(args, self.train_cfg)
 
         # Setup logging
         self.logger, self.csv_logger, self.metrics_logger = self._setup_logging()
 
         # Setup device
-        self.device = self._setup_device()
+        self.device = EnvironmentSetup.setup_device(self.args.device, self.args.quiet)
 
         # Setup mixed precision
         self.scaler = torch.cuda.amp.GradScaler() if args.mixed_precision else None
+        
+        # Initialize Checkpoint Manager
+        self.ckpt_manager = CheckpointManager(
+            self.ckpt_dir, 
+            self.logger, 
+            keep_last=self.args.keep_last
+        )
 
         # Log configuration
         self._log_config()
@@ -59,17 +82,6 @@ class Trainer:
         self.optimizer = None
         self.start_epoch = 0
         self.best_loss = float("inf")
-
-    def _set_seed(self, seed):
-        """Set random seed for reproducibility"""
-        random.seed(seed)
-        np.random.seed(seed)
-        torch.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-
-        if self.args.deterministic:
-            torch.backends.cudnn.deterministic = True
-            torch.backends.cudnn.benchmark = False
 
     def _load_configs(self):
         """Load YAML configurations"""
@@ -98,31 +110,6 @@ class Trainer:
         if self.args.log_dir:
             self.train_cfg["logging"]["log_dir"] = self.args.log_dir
 
-    def _setup_directories(self):
-        """Setup experiment and checkpoint directories"""
-        # Get current timestamp
-        now = datetime.datetime.now()
-        date_str = now.strftime("%d-%m-%Y")
-        time_str = now.strftime("%H-%M-%S")
-        
-        # Base output directory: output/dd-mm-yyyy/timestamp
-        base_dir = Path("output") / date_str / time_str
-        
-        if self.args.exp_name:
-             base_dir = base_dir / self.args.exp_name
-
-        # Update log dir in config so other components know where to log
-        self.train_cfg["logging"]["log_dir"] = str(base_dir)
-        self.train_cfg["checkpoints"]["dir"] = str(base_dir / "checkpoints")
-
-        exp_dir = base_dir
-        ckpt_dir = base_dir / "checkpoints"
-
-        exp_dir.mkdir(parents=True, exist_ok=True)
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
-
-        return exp_dir, ckpt_dir
-
     def _setup_logging(self):
         """Setup all loggers"""
         logger = setup_logger(
@@ -139,30 +126,6 @@ class Trainer:
             "metrics.json"
         )
         return logger, csv_logger, metrics_logger
-
-    def _setup_device(self):
-        """Setup compute device"""
-        if self.args.device == "auto":
-            if torch.cuda.is_available():
-                device = torch.device("cuda")
-                if not self.args.quiet:
-                    gpu_name = torch.cuda.get_device_name(0)
-                    gpu_memory = torch.cuda.get_device_properties(0).total_memory / 1e9
-                    print(f"✓ Auto-selected GPU: {gpu_name} ({gpu_memory:.1f}GB)")
-            else:
-                device = torch.device("cpu")
-                if not self.args.quiet:
-                    print("⚠ No GPU available, using CPU")
-        else:
-            device = torch.device(self.args.device)
-            if not self.args.quiet:
-                if device.type == "cuda":
-                    gpu_name = torch.cuda.get_device_name(device)
-                    print(f"✓ Using GPU: {gpu_name}")
-                else:
-                    print(f"✓ Using device: {device}")
-
-        return device
 
     def _log_config(self):
         """Log training configuration"""
@@ -335,11 +298,50 @@ class Trainer:
         else:
             self.logger.info(f"Optimizer: Adam (lr={lr})")
 
-    def _load_checkpoint(self, checkpoint_path):
-        """Load checkpoint from path"""
-        self.logger.info(f"Loading checkpoint: {checkpoint_path}")
-        checkpoint = torch.load(checkpoint_path, map_location=self.device)
+    def _handle_checkpoint_loading(self):
+        """Handle checkpoint loading based on mode"""
+        checkpoint = None
+        
+        if self.args.checkpoint:
+            # Force load specific checkpoint
+            ckpt_path = Path(self.args.checkpoint)
+            if ckpt_path.is_dir():
+                ckpt_path = ckpt_path / "checkpoints" / "checkpoint_latest.pth"
+                if not ckpt_path.exists():
+                     ckpt_path = Path(self.args.checkpoint) / "checkpoint_latest.pth"
+            
+            if not ckpt_path.exists():
+                raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+            
+            checkpoint = self.ckpt_manager.load(ckpt_path, self.device)
 
+        elif self.args.mode == "resume":
+            # Force resume from latest
+            latest_ckpt = self.ckpt_dir / "checkpoint_latest.pth"
+            if latest_ckpt.exists():
+                checkpoint = self.ckpt_manager.load(latest_ckpt, self.device)
+            else:
+                self.logger.error(f"❌ No checkpoint found at {latest_ckpt}")
+                raise FileNotFoundError(f"Cannot resume: {latest_ckpt} not found")
+
+        elif self.args.mode == "train":
+            # Auto-resume if checkpoint exists
+            latest_ckpt = self.ckpt_dir / "checkpoint_latest.pth"
+            if latest_ckpt.exists():
+                self.logger.info(f"Auto-resuming from: {latest_ckpt}")
+                checkpoint = self.ckpt_manager.load(latest_ckpt, self.device)
+            else:
+                self.logger.info("Starting fresh training")
+
+        elif self.args.mode == "scratch":
+            self.logger.info("Starting fresh training (ignoring checkpoints)")
+            
+        # Apply checkpoint state if loaded
+        if checkpoint:
+            self._apply_checkpoint(checkpoint)
+
+    def _apply_checkpoint(self, checkpoint):
+        """Applies loaded checkpoint state to model and optimizer"""
         self.encoder.load_state_dict(checkpoint["encoder_state_dict"])
         self.explicit.load_state_dict(checkpoint["explicit_state_dict"])
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
@@ -352,110 +354,6 @@ class Trainer:
 
         self.logger.info(f"✓ Loaded checkpoint from epoch {checkpoint['epoch']}")
         self.logger.info(f"  Best loss: {self.best_loss:.6f}")
-
-    def _handle_checkpoint_loading(self):
-        """Handle checkpoint loading based on mode"""
-        if self.args.checkpoint:
-            # Force load specific checkpoint
-            ckpt_path = Path(self.args.checkpoint)
-            if ckpt_path.is_dir():
-                # If directory provided, look for latest checkpoint
-                ckpt_path = ckpt_path / "checkpoints" / "checkpoint_latest.pth"
-                if not ckpt_path.exists():
-                     # Try looking directly in the dir
-                     ckpt_path = Path(self.args.checkpoint) / "checkpoint_latest.pth"
-            
-            if not ckpt_path.exists():
-                raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
-                
-            self._load_checkpoint(ckpt_path)
-
-        elif self.args.mode == "resume":
-            # Force resume from latest
-            latest_ckpt = self.ckpt_dir / "checkpoint_latest.pth"
-            if latest_ckpt.exists():
-                self._load_checkpoint(latest_ckpt)
-            else:
-                self.logger.error(f"❌ No checkpoint found at {latest_ckpt}")
-                raise FileNotFoundError(f"Cannot resume: {latest_ckpt} not found")
-
-        elif self.args.mode == "train":
-            # Auto-resume if checkpoint exists
-            latest_ckpt = self.ckpt_dir / "checkpoint_latest.pth"
-            if latest_ckpt.exists():
-                self.logger.info(f"Auto-resuming from: {latest_ckpt}")
-                self._load_checkpoint(latest_ckpt)
-            else:
-                self.logger.info("Starting fresh training")
-
-        elif self.args.mode == "scratch":
-            self.logger.info("Starting fresh training (ignoring checkpoints)")
-
-    def _save_checkpoint(self, epoch, loss, is_best=False):
-        """Save checkpoint"""
-        if self.args.no_save:
-            return
-
-        checkpoint = {
-            "epoch": epoch,
-            "encoder_state_dict": self.encoder.state_dict(),
-            "explicit_state_dict": self.explicit.state_dict(),
-            "optimizer_state_dict": self.optimizer.state_dict(),
-            "scaler_state_dict": self.scaler.state_dict() if self.scaler else None,
-            "loss": loss,
-            "best_loss": self.best_loss,
-        }
-
-        # Save epoch checkpoint
-        ckpt_path = self.ckpt_dir / f"checkpoint_epoch_{epoch:04d}.pth"
-        torch.save(checkpoint, ckpt_path)
-
-        # Save latest
-        latest_path = self.ckpt_dir / "checkpoint_latest.pth"
-        torch.save(checkpoint, latest_path)
-
-        # Save best
-        if is_best:
-            best_path = self.ckpt_dir / "checkpoint_best.pth"
-            torch.save(checkpoint, best_path)
-            self.logger.info(f"  💾 Best checkpoint saved (loss: {loss:.6f})")
-
-        # Save metadata
-        metadata = {
-            "last_epoch": epoch,
-            "best_epoch": -1,  # You might want to track this in self
-            "last_loss": loss,
-            "best_loss": self.best_loss,
-            "timestamp": datetime.datetime.now().isoformat()
-        }
-        
-        # If this is best, update best epoch
-        if is_best:
-            metadata["best_epoch"] = epoch
-            
-        # Try to read existing metadata to preserve history if needed, 
-        # but for now we overwrite with current state
-        meta_path = self.exp_dir / "training_metadata.json"
-        
-        # If exists, read to keep best_epoch if we are not currently best
-        if meta_path.exists() and not is_best:
-            try:
-                with open(meta_path, 'r') as f:
-                    old_meta = json.load(f)
-                    metadata["best_epoch"] = old_meta.get("best_epoch", -1)
-            except:
-                pass
-
-        with open(meta_path, 'w') as f:
-            json.dump(metadata, f, indent=4)
-
-        # Rotate old checkpoints
-        all_checkpoints = sorted(self.ckpt_dir.glob("checkpoint_epoch_*.pth"))
-        if len(all_checkpoints) > self.args.keep_last:
-            for old_ckpt in all_checkpoints[:-self.args.keep_last]:
-                old_ckpt.unlink()
-                if not self.args.quiet:
-                    self.logger.info(f"  🗑️  Removed old checkpoint: {old_ckpt.name}")
 
     def train_epoch(self, epoch):
         """Train single epoch - Colab optimized"""
@@ -471,10 +369,10 @@ class Trainer:
                 self.train_loader,
                 desc=f"Epoch {epoch + 1}/{self.train_cfg['epochs']}",
                 total=num_batches,
-                leave=False,  # Don't leave bar after completion (fixes mess)
+                leave=False,
                 ncols=100,
                 disable=self.args.quiet,
-                position=0  # Single position for Colab
+                position=0
             )
         else:
             pbar = self.train_loader
@@ -483,7 +381,6 @@ class Trainer:
             # Move to device
             img = img.to(self.device, non_blocking=True)
             gt_pc = gt_pc.to(self.device, non_blocking=True)
-
 
             # Forward pass with mixed precision
             if self.args.mixed_precision and self.scaler:
@@ -494,8 +391,6 @@ class Trainer:
                     # Losses
                     cham_loss = chamfer_loss(pred_pc, gt_pc)
                     
-                    # Get mesh structure for regularizers
-                    # explicit.E is the edge index buffer
                     pred_mesh = (pred_pc, self.explicit.E)
                     
                     smooth_loss = smoothness_loss(pred_mesh, penalty=0.1)
@@ -607,21 +502,52 @@ class Trainer:
                 # Save checkpoint
                 save_every = self.train_cfg["checkpoints"].get("save_every", 1)
                 if (epoch + 1) % save_every == 0 or is_best:
-                    self._save_checkpoint(epoch, avg_loss, is_best)
-                    if not is_best:
+                    if not self.args.no_save:
+                        state = {
+                            "epoch": epoch,
+                            "encoder_state_dict": self.encoder.state_dict(),
+                            "explicit_state_dict": self.explicit.state_dict(),
+                            "optimizer_state_dict": self.optimizer.state_dict(),
+                            "scaler_state_dict": self.scaler.state_dict() if self.scaler else None,
+                            "loss": avg_loss,
+                            "best_loss": self.best_loss,
+                        }
+                        self.ckpt_manager.save(state, epoch, avg_loss, is_best, self.best_loss)
+                    
+                    if not is_best and not self.args.no_save:
                         self.logger.info(f"  💾 Checkpoint saved at epoch {epoch + 1}")
 
         except KeyboardInterrupt:
             self.logger.info("\n⚠ Training interrupted by user")
             self.logger.info("Saving emergency checkpoint...")
-            self._save_checkpoint(epoch, avg_loss, False)
+            if not self.args.no_save:
+                state = {
+                    "epoch": epoch,
+                    "encoder_state_dict": self.encoder.state_dict(),
+                    "explicit_state_dict": self.explicit.state_dict(),
+                    "optimizer_state_dict": self.optimizer.state_dict(),
+                    "scaler_state_dict": self.scaler.state_dict() if self.scaler else None,
+                    "loss": avg_loss,
+                    "best_loss": self.best_loss,
+                }
+                self.ckpt_manager.save(state, epoch, avg_loss, False, self.best_loss)
             self.logger.info("✓ Emergency checkpoint saved")
 
         except Exception as e:
             self.logger.error(f"❌ Training failed with error: {e}")
             self.logger.info("Saving emergency checkpoint...")
             try:
-                self._save_checkpoint(epoch, avg_loss, False)
+                if not self.args.no_save:
+                    state = {
+                        "epoch": epoch,
+                        "encoder_state_dict": self.encoder.state_dict(),
+                        "explicit_state_dict": self.explicit.state_dict(),
+                        "optimizer_state_dict": self.optimizer.state_dict(),
+                        "scaler_state_dict": self.scaler.state_dict() if self.scaler else None,
+                        "loss": avg_loss,
+                        "best_loss": self.best_loss,
+                    }
+                    self.ckpt_manager.save(state, epoch, avg_loss, False, self.best_loss)
                 self.logger.info("✓ Emergency checkpoint saved")
             except:
                 pass
@@ -632,10 +558,40 @@ class Trainer:
         self.logger.info(f"Best loss: {self.best_loss:.6f}")
         self.logger.info(f"Checkpoints saved to: {self.ckpt_dir}")
         self.logger.info(f"Logs saved to: {self.exp_dir}")
+
+        # Post-Training Hooks
+        if self.args.generate_graph:
+            self.logger.info("Generating training graphs...")
+            try:
+                plot_training_logs(self.csv_logger.path, self.exp_dir / "graphs")
+            except Exception as e:
+                self.logger.error(f"Failed to generate graphs: {e}")
+
+        if self.args.generate_model:
+            self.logger.info("Generating sample 3D models...")
+            try:
+                # Reload best model for generation
+                best_ckpt = self.ckpt_dir / "checkpoint_best.pth"
+                if best_ckpt.exists():
+                    checkpoint = torch.load(best_ckpt, map_location=self.device)
+                    self.encoder.load_state_dict(checkpoint["encoder_state_dict"])
+                    self.explicit.load_state_dict(checkpoint["explicit_state_dict"])
+                    
+                generate_batch(
+                    self.args.config_dir, 
+                    self.exp_dir / "generated_samples",
+                    self.encoder,
+                    self.explicit,
+                    self.device,
+                    self.model_cfg,
+                    num_samples=10 # Default to 10 per run
+                )
+            except Exception as e:
+                self.logger.error(f"Failed to generate models: {e}")
+
         self.logger.info("=" * 70)
 
-
-# Backward compatibility wrapper
+# Backward compatibility wrapper (kept if needed, but class is main)
 def train_phase1(args):
     """Wrapper function for backward compatibility"""
     trainer = Trainer(args)

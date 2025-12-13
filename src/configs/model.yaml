@@ -8,4 +8,4 @@ explicit_branch:
   init_mesh:
     template: "sphere"
     subdivisions: 2       # ~642 vertices
-  gcn_hidden_dims: [ 128, 64 ]
+  gcn_hidden_dims: [ 256, 128, 128, 64 ]
