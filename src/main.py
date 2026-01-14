@@ -144,6 +144,10 @@ def parse_args():
         help="Limit dataset to N samples (for testing/generation)"
     )
     data_group.add_argument(
+        "--inspect-data", action="store_true",
+        help="Inspect sample data during loading"
+    )
+    data_group.add_argument(
         "--image", type=str, default=None,
         help="Path to single image for 'generate' mode"
     )

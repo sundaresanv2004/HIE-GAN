@@ -1,14 +1,18 @@
-root_dir: "data/ShapeNetCore_4"
+root_dir: "data/ShapeNetCore_V5"
 
 classes:
-  - "02954340"
-  - "03001627"
-  - "03636649"
-  - "04379243"
+  - "02691156" # Airplane
+  - "02958343" # Car
+  - "03001627" # Chair
+  - "03636649" # Lamp
+  #- "04379243" # Table
 
 image:
   channels: 3
   size: 224
+
+sdf:
+  num_samples: 2048
 
 pointcloud:
   filename: "model_normalized.ply"

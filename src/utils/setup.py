@@ -43,11 +43,12 @@ class EnvironmentSetup:
         date_str = now.strftime("%d-%m-%Y")
         time_str = now.strftime("%H-%M-%S")
         
-        # Base output directory: output/dd-mm-yyyy/timestamp
-        base_dir = Path("output") / date_str / time_str
-        
+        # Base output directory
         if args.exp_name:
-             base_dir = base_dir / args.exp_name
+            base_dir = Path("output") / args.exp_name / date_str / time_str
+        else:
+            # Fallback if no experiment name provided
+            base_dir = Path("output") / "default" / date_str / time_str
 
         # Update log dir in config so other components know where to log
         train_cfg["logging"]["log_dir"] = str(base_dir)

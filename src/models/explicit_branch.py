@@ -4,7 +4,7 @@ from torch_geometric.nn import GCNConv
 
 
 class ExplicitDeformer(nn.Module):
-    def __init__(self, init_mesh, feature_dim=256, hidden_dims=[128, 64]):
+    def __init__(self, init_mesh, feature_dim=256, hidden_dims=[128, 64], use_layer_norm=True):
         super().__init__()
         V0, E0 = init_mesh
 
@@ -13,6 +13,7 @@ class ExplicitDeformer(nn.Module):
         self.register_buffer("E", E0)
 
         layers = []
+        norms = []
         
         # Input layer
         input_dim = 3 + feature_dim
@@ -20,14 +21,22 @@ class ExplicitDeformer(nn.Module):
         # Hidden layers
         for h_dim in hidden_dims:
             layers.append(GCNConv(input_dim, h_dim))
+            
+            if use_layer_norm:
+                 norms.append(nn.LayerNorm(h_dim))
+            else:
+                 norms.append(nn.Identity())
+                 
             input_dim = h_dim
             
         self.gcn_layers = nn.ModuleList(layers)
+        self.norm_layers = nn.ModuleList(norms)
         
         # Output layer (always outputs 3 for displacement)
         self.final_layer = GCNConv(input_dim, 3)
         
         self.relu = nn.ReLU()
+        self.use_layer_norm = use_layer_norm
 
     def forward(self, img_feat):
         """
@@ -56,9 +65,11 @@ class ExplicitDeformer(nn.Module):
         offset = torch.arange(B, device=self.E.device).repeat_interleave(num_edges) * N
         E = E + offset.unsqueeze(0)
 
-        # GCN layers with activations
-        for layer in self.gcn_layers:
-            X = self.relu(layer(X, E))
+        # GCN layers with activations and norms
+        for layer, norm in zip(self.gcn_layers, self.norm_layers):
+            X = layer(X, E)
+            X = norm(X)
+            X = self.relu(X)
             
         # Final layer
         dV = self.final_layer(X, E)  # Predict vertex displacement

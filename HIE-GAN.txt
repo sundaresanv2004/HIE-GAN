@@ -1,0 +1,345 @@
+DETAILED CODE FLOW
+
+
+1️⃣ DATA LOADING
+
+File: src/dataloader/dataset.py
+
+- Reads one object folder
+- Picks one random image from 16 images
+- Reads corresponding cloud.ply
+- Applies transforms (resize, normalize)
+
+Returns:
+{
+    'image': Tensor[C, H, W],
+    'point_cloud': Tensor[N, 3]
+}
+
+Both are used for supervised loss.
+
+
+--------------------------------------------------
+2️⃣ MODEL COMPONENTS
+--------------------------------------------------
+
+A) FEATURE EXTRACTOR
+File: feature_extractor.py
+
+- ResNet-10 encoder
+- Converts input image → feature map Φ
+- Output: deep visual features shared by both branches
+
+
+B) EXPLICIT BRANCH
+File: explicit_branch.py
+
+- Start with a template mesh (sphere or ellipsoid)
+- Uses GCN layers (torch-geometric)
+- Learns vertex deformations conditioned on Φ
+- Output: deformed explicit mesh (V, E, F)
+
+
+C) IMPLICIT BRANCH
+File: implicit_branch.py
+
+- Deep MLP or small UNet conditioned on Φ
+- Predicts SDF or occupancy values
+- Samples a 3D grid
+- Applies Marching Cubes to extract surface
+- Output: implicit mesh
+
+
+D) FUSION MODULE
+File: fusion_module.py
+
+- Takes explicit mesh and implicit mesh
+- Produces a fused mesh:
+
+M_fused = α * M_explicit + (1 - α) * M_implicit
+
+Where α can be:
+- Learned
+- Scheduled
+- Per-vertex
+- Uniform
+
+
+E) DISCRIMINATOR
+File: discriminator.py
+
+- Geometry-aware GAN discriminator
+- Input: sampled point clouds
+- Learns realism of 3D shapes
+- Loss guides fine surface detail
+
+
+--------------------------------------------------
+3️⃣ LOSS FUNCTIONS
+--------------------------------------------------
+
+Located in: src/losses/
+
+A) Chamfer Distance
+- Compares predicted mesh (sampled as point cloud) with GT cloud
+- Ensures correct geometry
+
+B) SDF Loss
+- Supervises implicit branch
+- Enforces accurate signed distance learning
+
+C) Adversarial Loss
+- Encourages realistic shapes
+- Reduces noise
+- Enforces sharper details
+
+D) Regularizers
+- Mesh smoothness
+- Laplacian regularization
+- Edge consistency
+- Prevents unstable deformation
+
+
+--------------------------------------------------
+4️⃣ TRAINING SCRIPT
+--------------------------------------------------
+
+File: train.py
+
+Responsibilities:
+- Create dataset and dataloader
+- Initialize generator model and discriminator
+- Forward pass:
+    image → features
+    explicit mesh deformation
+    implicit mesh prediction
+    fusion
+- Compute losses:
+    chamfer
+    sdf
+    adversarial
+- Backpropagation
+- Update generator and discriminator
+- Save checkpoints
+- Log metrics
+
+
+--------------------------------------------------
+🌀 TRAINING LOOP (PSEUDO-CODE)
+--------------------------------------------------
+
+for batch in dataloader:
+    image, gt_cloud = batch
+
+    # Forward pass
+    M_explicit, M_implicit, M_fused = model(image)
+
+    # Convert mesh to point cloud
+    pred_cloud = sample_points(M_fused)
+
+    # Losses
+    L_chamfer = chamfer(pred_cloud, gt_cloud)
+    L_sdf = sdf_loss(...)
+    L_gan = adversarial(...)
+
+    total_loss = L_chamfer + L_sdf + L_gan
+
+    # Generator update
+    optimizer_g.zero_grad()
+    total_loss.backward()
+    optimizer_g.step()
+
+    # Discriminator update
+    update_discriminator(...)
+
+
+--------------------------------------------------
+🧪 INFERENCE
+--------------------------------------------------
+
+File: src/inference/infer_single.py
+
+Command:
+python infer_single.py --image input.jpg
+
+Steps:
+- Encode image (no ground truth required)
+- Run explicit branch
+- Run implicit branch
+- Fuse meshes
+- Export mesh (.obj or .ply) to:
+
+outputs/meshes/
+
+
+--------------------------------------------------
+🧾 CHECKPOINTING
+--------------------------------------------------
+
+Directory:
+outputs/checkpoints/
+
+Includes:
+- Model weights
+- Optimizer state
+- Epoch and loss state
+
+
+--------------------------------------------------
+🧭 EXECUTION WORKFLOW
+--------------------------------------------------
+
+1) Training
+python src/trainer/train.py
+
+2) Evaluation
+python src/trainer/evaluate.py
+
+3) Inference (single image)
+python src/inference/infer_single.py --image assets/chair.png
+
+
+--------------------------------------------------
+💡 KEY DEVELOPMENT STRATEGY
+--------------------------------------------------
+
+DO NOT implement everything at once.
+
+Build in layers:
+
+STEP 1: Baseline
+- Data loader
+- Feature extractor
+- Explicit branch only
+- Chamfer loss
+- Train ~1 week
+
+STEP 2:
+- Add implicit branch
+- Marching cubes
+- SDF loss
+
+STEP 3:
+- Add fusion logic
+- Validate convergence
+
+STEP 4:
+- Add GAN + discriminator
+
+This makes debugging significantly easier.
+
+
+--------------------------------------------------
+🧠 WHY THIS ARCHITECTURE IS CLEAN
+--------------------------------------------------
+
+- Every module is isolated in its own file
+- Training pipeline never touches model internals
+- Fusion and branches are fully swappable
+- Losses are cleanly isolated
+- Inference does not require discriminator or GT
+
+
+--------------------------------------------------
+📌 NEXT STEP (RECOMMENDED)
+--------------------------------------------------
+
+Generate:
+- PROJECT_STRUCTURE.md
+- Baseline code stubs for:
+    - dataloader
+    - explicit branch
+    - implicit branch
+    - fusion module
+    - chamfer loss
+    - train.py template
+
+
+--------------------------------------------------
+🏋️ TRAINING PHASES
+--------------------------------------------------
+
+Phase 1 — Basic 3D Regression
+- image → explicit mesh
+- chamfer loss only
+- no GAN
+- no implicit branch
+
+Phase 2 — Add Implicit Branch
+- SDF supervision
+- marching cubes
+- improved detail
+
+Phase 3 — Add Fusion
+- fuse explicit + implicit
+- chamfer improves visibly
+
+Phase 4 — Add Adversarial Training
+- discriminator learns realism
+- GAN sharpens surfaces
+
+
+--------------------------------------------------
+📁 PROJECT FOLDER STRUCTURE (FINAL)
+--------------------------------------------------
+
+HIE-GAN/
+│
+├── Dockerfile
+├── DOCKER_SETUP.md
+├── requirements.txt
+│
+├── data/
+│   ├── shapenet/
+│   │   ├── <object_id>/
+│   │   │   ├── images/            # 16 images
+│   │   │   ├── cloud.ply          # point cloud ground truth
+│   │   │   └── metadata.json      # optional
+│   └── processed/
+│
+├── src/
+│   ├── dataloader/
+│   │   ├── dataset.py
+│   │   ├── transforms.py
+│   │   └── collate_fn.py
+│   │
+│   ├── models/
+│   │   ├── feature_extractor.py
+│   │   ├── explicit_branch.py
+│   │   ├── implicit_branch.py
+│   │   ├── fusion_module.py
+│   │   ├── discriminator.py
+│   │   └── hiegan.py
+│   │
+│   ├── losses/
+│   │   ├── chamfer.py
+│   │   ├── sdf_loss.py
+│   │   ├── adversarial_loss.py
+│   │   └── regularizers.py
+│   │
+│   ├── utils/
+│   │   ├── mesh_ops.py
+│   │   ├── pointcloud_ops.py
+│   │   ├── visualization.py
+│   │   └── logging.py
+│   │
+│   ├── trainer/
+│   │   ├── train.py
+│   │   └── evaluate.py
+│   │
+│   └── inference/
+│       ├── infer_single.py
+│       └── export_mesh.py
+│
+├── configs/
+│   ├── model.yaml
+│   ├── train.yaml
+│   └── dataset.yaml
+│
+├── notebooks/
+│   └── experiments.ipynb
+│
+└── outputs/
+    ├── logs/
+    ├── checkpoints/
+    └── meshes/

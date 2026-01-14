@@ -4,9 +4,9 @@ Dataset loading utilities with detailed statistics and visualization
 import os
 import torch
 import numpy as np
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, ConcatDataset
 from pathlib import Path
-
+import trimesh
 
 class DatasetLoader:
     """Handles dataset loading with detailed logging and statistics"""
@@ -27,14 +27,37 @@ class DatasetLoader:
         self.logger.info("📊 Loading Dataset")
         self.logger.info("=" * 70)
 
-        # Create dataset
-        dataset = self._create_dataset(dataset_class)
-
-        # Analyze dataset
-        self._analyze_dataset(dataset)
-
-        # Split train/val
-        train_dataset, val_dataset = self._split_dataset(dataset)
+        # Determine if we have explicit train/val/test folders
+        root_dir = Path(self.dataset_cfg["root_dir"])
+        train_dir = root_dir / "train"
+        val_dir = root_dir / "val"
+        
+        explicit_splits = train_dir.exists() and val_dir.exists()
+        
+        if explicit_splits:
+            self.logger.info("✓ Found explicit train/val directories")
+            train_dataset = self._create_dataset(dataset_class, root_dir=train_dir, split="train")
+            val_dataset = self._create_dataset(dataset_class, root_dir=val_dir, split="val")
+            
+            # Check for test split
+            test_dir = root_dir / "test"
+            if test_dir.exists():
+                self.logger.info("✓ Found explicit test directory")
+                test_dataset = self._create_dataset(dataset_class, root_dir=test_dir, split="test")
+                # We don't return test_dataset here for now as Trainer expects 2, 
+                # but we can store it or extend return.
+                # For now let's just log it.
+            else:
+                self.logger.info("ℹ No explicit test directory found")
+        else:
+            self.logger.info("⚠ No explicit splits found, loading from root and splitting randomly")
+            full_dataset = self._create_dataset(dataset_class, root_dir=root_dir, split="all")
+            train_dataset, val_dataset = self._split_dataset(full_dataset)
+        
+        # Analyze datasets
+        self._analyze_dataset(train_dataset, "Train")
+        if val_dataset:
+            self._analyze_dataset(val_dataset, "Val")
 
         # Create dataloaders
         self._create_dataloaders(train_dataset, val_dataset)
@@ -46,55 +69,37 @@ class DatasetLoader:
 
         return self.train_loader, self.val_loader
 
-    def _create_dataset(self, dataset_class):
+    def _create_dataset(self, dataset_class, root_dir, split):
         """Create dataset instance"""
-        self.logger.info(f"📁 Dataset root: {self.dataset_cfg['root_dir']}")
-        self.logger.info(f"📦 Classes: {', '.join(self.dataset_cfg['classes'])}")
-        self.logger.info(f"🖼️  Image size: {self.dataset_cfg['image']['size']}x{self.dataset_cfg['image']['size']}")
-        self.logger.info(f"☁️  Point cloud file: {self.dataset_cfg['pointcloud']['filename']}")
-
+        self.logger.info(f"📁 Loading {split} dataset from: {root_dir}")
+        
         dataset = dataset_class(
-            root_dir=self.dataset_cfg["root_dir"],
+            root_dir=root_dir,
             classes=self.dataset_cfg["classes"],
             pc_filename=self.dataset_cfg["pointcloud"]["filename"],
             image_size=self.dataset_cfg["image"]["size"],
+            num_sdf_samples=self.dataset_cfg.get("sdf", {}).get("num_samples", 2048),
         )
-
         return dataset
 
-    def _analyze_dataset(self, dataset):
+    def _analyze_dataset(self, dataset, name):
         """Analyze dataset and gather statistics"""
         total_objects = len(dataset)
-        self.logger.info(f"📊 Total objects found: {total_objects}")
-
-        # Store stats
-        self.dataset_stats['total_objects'] = total_objects
-        self.dataset_stats['classes'] = self.dataset_cfg['classes']
-
-        # Count objects per class
-        class_counts = {}
-        for obj_path in dataset.object_paths:
-            class_name = Path(obj_path).parent.name
-            class_counts[class_name] = class_counts.get(class_name, 0) + 1
-
-        self.logger.info("📈 Objects per class:")
-        for cls, count in sorted(class_counts.items()):
-            self.logger.info(f"   {cls}: {count}")
-
-        self.dataset_stats['class_counts'] = class_counts
+        self.logger.info(f"📊 {name} objects: {total_objects}")
+        
+        self.dataset_stats[f'{name}_size'] = total_objects
 
         # Limit dataset if requested
         if self.args.debug:
             dataset.object_paths = dataset.object_paths[:32]
-            self.logger.info(f"⚠️  DEBUG: Limited to {len(dataset)} samples")
+            self.logger.info(f"⚠️  DEBUG: Limited {name} to {len(dataset)} samples")
         elif self.args.num_samples:
+              # For explicit splits, we might want to limit total, but here we limit per split roughly
             dataset.object_paths = dataset.object_paths[:self.args.num_samples]
-            self.logger.info(f"⚠️  Limited to {len(dataset)} samples")
+            self.logger.info(f"⚠️  Limited {name} to {len(dataset)} samples")
 
-        self.dataset_stats['used_objects'] = len(dataset)
-
-        # Sample one batch for analysis
-        if self.args.inspect_data:
+        # Sample one batch for analysis on Train only
+        if name == "Train" and self.args.inspect_data:
             self._inspect_sample(dataset)
 
     def _inspect_sample(self, dataset):
@@ -102,28 +107,23 @@ class DatasetLoader:
         self.logger.info("🔍 Inspecting sample data...")
 
         try:
-            img, pc = dataset[0]
-
-            self.logger.info(f"   Image shape: {img.shape}")
-            self.logger.info(f"   Image dtype: {img.dtype}")
-            self.logger.info(f"   Image range: [{img.min():.3f}, {img.max():.3f}]")
-            self.logger.info(f"   Point cloud shape: {pc.shape}")
-            self.logger.info(f"   Point cloud dtype: {pc.dtype}")
-            self.logger.info(f"   PC range: X=[{pc[:, 0].min():.3f}, {pc[:, 0].max():.3f}], "
-                             f"Y=[{pc[:, 1].min():.3f}, {pc[:, 1].max():.3f}], "
-                             f"Z=[{pc[:, 2].min():.3f}, {pc[:, 2].max():.3f}]")
-
-            self.dataset_stats['sample_info'] = {
-                'image_shape': tuple(img.shape),
-                'pc_shape': tuple(pc.shape),
-                'pc_num_points': pc.shape[0],
-            }
+            # Unpack assuming 4 items for Phase 2: img, pc, points, sdf
+            sample = dataset[0]
+            if len(sample) == 4:
+                img, pc, query_pts, query_sdf = sample
+                self.logger.info(f"   Image: {img.shape} {img.dtype}")
+                self.logger.info(f"   PC: {pc.shape} {pc.dtype}")
+                self.logger.info(f"   Query Pts: {query_pts.shape} {query_pts.dtype}")
+                self.logger.info(f"   Query SDF: {query_sdf.shape} {query_sdf.dtype}")
+                self.logger.info(f"   SDF Range: {query_sdf.min():.4f} to {query_sdf.max():.4f}")
+            else:
+                self.logger.info(f"   Got {len(sample)} items in sample (Legacy Phase 1?)")
 
         except Exception as e:
             self.logger.warning(f"⚠️  Failed to inspect sample: {e}")
 
     def _split_dataset(self, dataset):
-        """Split dataset into train/val"""
+        """Split dataset into train/val (Legacy fallback)"""
         if self.args.val_split and self.args.val_split > 0:
             val_size = int(len(dataset) * self.args.val_split)
             train_size = len(dataset) - val_size
@@ -132,54 +132,20 @@ class DatasetLoader:
                 dataset, [train_size, val_size],
                 generator=torch.Generator().manual_seed(self.args.seed or 42)
             )
-
-            self.logger.info(f"📊 Split - Train: {len(train_dataset)} | Val: {len(val_dataset)} "
-                             f"(ratio: {self.args.val_split:.1%})")
-
-            self.dataset_stats['train_size'] = len(train_dataset)
-            self.dataset_stats['val_size'] = len(val_dataset)
+            return train_dataset, val_dataset
         else:
-            train_dataset = dataset
-            val_dataset = None
-            self.logger.info("📊 No validation split")
-            self.dataset_stats['train_size'] = len(train_dataset)
-            self.dataset_stats['val_size'] = 0
-
-        return train_dataset, val_dataset
+            return dataset, None
 
     def _create_dataloaders(self, train_dataset, val_dataset):
         """Create train and validation dataloaders"""
         batch_size = self.train_cfg["batch_size"]
         num_workers = self.train_cfg["num_workers"]
-
-        # Determine pin_memory
-        if self.args.pin_memory is not None:
-            pin_memory = self.args.pin_memory
-        else:
-            pin_memory = torch.cuda.is_available()
-
-        # Calculate batches
-        train_batches = len(train_dataset) // batch_size
-        if len(train_dataset) % batch_size != 0:
-            train_batches += 1
+        
+        pin_memory = self.args.pin_memory if self.args.pin_memory is not None else torch.cuda.is_available()
 
         self.logger.info(f"🔢 Batch size: {batch_size}")
         self.logger.info(f"👷 Workers: {num_workers}")
-        self.logger.info(f"📦 Train batches per epoch: {train_batches}")
-        self.logger.info(f"📊 Train samples per epoch: {len(train_dataset)}")
-
-        self.dataset_stats['batch_size'] = batch_size
-        self.dataset_stats['train_batches'] = train_batches
-
-        # Warning if very few batches
-        if train_batches < 10:
-            self.logger.warning(f"⚠️  Only {train_batches} batches per epoch!")
-            self.logger.warning(f"⚠️  Consider:")
-            self.logger.warning(f"    - Decreasing batch size (current: {batch_size})")
-            self.logger.warning(f"    - Adding more data classes")
-            self.logger.warning(f"    - Increasing dataset size")
-
-        # Create train loader
+        
         self.train_loader = DataLoader(
             train_dataset,
             batch_size=batch_size,
@@ -187,18 +153,9 @@ class DatasetLoader:
             num_workers=num_workers,
             pin_memory=pin_memory,
             persistent_workers=(num_workers > 0),
-            drop_last=False,
         )
 
-        # Create val loader if needed
         if val_dataset:
-            val_batches = len(val_dataset) // batch_size
-            if len(val_dataset) % batch_size != 0:
-                val_batches += 1
-
-            self.logger.info(f"📦 Val batches per epoch: {val_batches}")
-            self.dataset_stats['val_batches'] = val_batches
-
             self.val_loader = DataLoader(
                 val_dataset,
                 batch_size=batch_size,
@@ -206,48 +163,29 @@ class DatasetLoader:
                 num_workers=num_workers,
                 pin_memory=pin_memory,
                 persistent_workers=(num_workers > 0),
-                drop_last=False,
             )
 
     def _log_summary(self):
         """Log dataset summary"""
         self.logger.info("📋 Dataset Summary:")
-        self.logger.info(f"   Total objects: {self.dataset_stats['total_objects']}")
-        self.logger.info(f"   Used objects: {self.dataset_stats['used_objects']}")
-        self.logger.info(f"   Train samples: {self.dataset_stats['train_size']}")
-        self.logger.info(f"   Val samples: {self.dataset_stats['val_size']}")
-        self.logger.info(f"   Batch size: {self.dataset_stats['batch_size']}")
-        self.logger.info(f"   Train batches: {self.dataset_stats['train_batches']}")
-
-        if 'sample_info' in self.dataset_stats:
-            self.logger.info(f"   Image shape: {self.dataset_stats['sample_info']['image_shape']}")
-            self.logger.info(f"   Points per cloud: {self.dataset_stats['sample_info']['pc_num_points']}")
-
-    def get_stats(self):
-        """Return dataset statistics"""
-        return self.dataset_stats
+        self.logger.info(f"   Train batches: {len(self.train_loader)}")
+        if self.val_loader:
+             self.logger.info(f"   Val batches: {len(self.val_loader)}")
 
 
 class ShapeNetDataset(torch.utils.data.Dataset):
     """
-    ShapeNet Dataset for Phase 1 Training
-    Loads images and corresponding point clouds
+    ShapeNet Dataset for Phase 1 & 2
+    Phase 2 Adds: SDF sampling
     """
 
-    def __init__(self, root_dir, classes, pc_filename="model_normalized.ply", image_size=224, num_points=2500):
-        """
-        Args:
-            root_dir (str): Path to ShapeNet dataset root
-            classes (list): List of class IDs to load
-            pc_filename (str): Name of the point cloud file in each object folder
-            image_size (int): Target image size
-            num_points (int): Number of points to sample from ground truth
-        """
+    def __init__(self, root_dir, classes, pc_filename="model_normalized.ply", image_size=224, num_points=2500, num_sdf_samples=2048):
         self.root_dir = Path(root_dir)
         self.classes = classes
         self.pc_filename = pc_filename
         self.image_size = image_size
         self.num_points = num_points
+        self.num_sdf_samples = num_sdf_samples
         self.object_paths = []
 
         # Collecting all object paths
@@ -260,16 +198,15 @@ class ShapeNetDataset(torch.utils.data.Dataset):
             if not class_dir.exists():
                 continue
             
-            # Each subdirectory is an object
             for obj_name in os.listdir(class_dir):
                 obj_path = class_dir / obj_name
                 if obj_path.is_dir():
-                    # Check if required files exist
                     if (obj_path / "images").exists() and (obj_path / self.pc_filename).exists():
                         self.object_paths.append(str(obj_path))
 
         # Standard ImageNet normalization
         from torchvision import transforms
+        from PIL import Image
         self.transform = transforms.Compose([
             transforms.Resize((int(image_size), int(image_size))),
             transforms.ToTensor(),
@@ -283,53 +220,93 @@ class ShapeNetDataset(torch.utils.data.Dataset):
         obj_path = Path(self.object_paths[idx])
 
         # 1. Load Image
-        # Randomly select one image from the 'images' folder
+        image_tensor = self._load_image(obj_path)
+
+        # 2. Load Mesh & Point Cloud
+        pc_path = obj_path / self.pc_filename
+        gt_pc, mesh = self._load_mesh_and_pc(pc_path)
+
+        # 3. Compute SDF Samples (Phase 2)
+        query_points, query_sdf = self._sample_sdf(mesh)
+
+        return image_tensor, gt_pc, query_points, query_sdf
+
+    def _load_image(self, obj_path):
         img_dir = obj_path / "images"
         image_files = list(img_dir.glob("*.jpg")) + list(img_dir.glob("*.png"))
         
         if not image_files:
-            # Fallback if no images (shouldn't happen due to init check)
-            image_tensor = torch.zeros(3, self.image_size, self.image_size)
-        else:
-            choice_idx = np.random.randint(len(image_files))
-            img_path = image_files[choice_idx]
+            return torch.zeros(3, self.image_size, self.image_size)
             
-            from PIL import Image
-            try:
-                image = Image.open(img_path).convert("RGB")
-                image_tensor = self.transform(image)
-            except Exception as e:
-                print(f"Error loading image {img_path}: {e}")
-                image_tensor = torch.zeros(3, self.image_size, self.image_size)
-
-        # 2. Load Point Cloud
-        pc_path = obj_path / self.pc_filename
+        choice_idx = np.random.randint(len(image_files))
+        img_path = image_files[choice_idx]
+        
+        from PIL import Image
         try:
-            # Use trimesh for robust loading if available, else numpy fallback
-            import trimesh
-            pc_mesh = trimesh.load(pc_path)
-            
-            # If it's a mesh, sample points
-            if hasattr(pc_mesh, 'vertices'):
-                 # If it is a mesh (faces), sample surface
-                if hasattr(pc_mesh, 'faces') and len(pc_mesh.faces) > 0:
-                    points, _ = trimesh.sample.sample_surface(pc_mesh, self.num_points)
-                else:
-                    # Just vertices
-                    points = np.array(pc_mesh.vertices)
-            else:
-                # Fallback
-                points = np.zeros((self.num_points, 3))
+            image = Image.open(img_path).convert("RGB")
+            return self.transform(image)
+        except Exception:
+            return torch.zeros(3, self.image_size, self.image_size)
 
-            # Resample if we have vertices but not enough or too many and didn't sample surface
+    def _load_mesh_and_pc(self, pc_path):
+        try:
+            mesh = trimesh.load(pc_path, process=False) # Keep original
+            
+            # Sample surface points for Chamfer Loss
+            if hasattr(mesh, 'faces') and len(mesh.faces) > 0:
+                points, _ = trimesh.sample.sample_surface(mesh, self.num_points)
+            else:
+                 # Fallback if just point cloud
+                if hasattr(mesh, 'vertices'):
+                     points = np.array(mesh.vertices)
+                else:
+                     points = np.zeros((self.num_points, 3))
+                     
+            # Resample
             if len(points) != self.num_points:
                 indices = np.random.choice(len(points), self.num_points, replace=True)
                 points = points[indices]
-
-            gt_pc = torch.from_numpy(points).float()
+                
+            return torch.from_numpy(points).float(), mesh
             
-        except Exception as e:
-            # print(f"Error loading PC {pc_path}: {e}")
-            gt_pc = torch.zeros(self.num_points, 3)
+        except Exception:
+            return torch.zeros(self.num_points, 3), None
 
-        return image_tensor, gt_pc
+    def _sample_sdf(self, mesh):
+        """
+        Sample points near surface and compute SDF.
+        Returns:
+            points: (N_samples, 3)
+            sdf: (N_samples, 1)
+        """
+        if mesh is None or not hasattr(mesh, 'faces') or len(mesh.faces) == 0:
+            # Fallback if no valid mesh for SDF
+            return torch.zeros(self.num_sdf_samples, 3), torch.zeros(self.num_sdf_samples, 1)
+
+        # 1. Surface points (for near-surface sampling)
+        surface_points, _ = trimesh.sample.sample_surface(mesh, self.num_sdf_samples)
+        
+        # 2. Add noise to surface points to get near-surface points
+        # Strategy: 90% near surface, 10% uniform
+        n_near = int(0.9 * self.num_sdf_samples)
+        n_uniform = self.num_sdf_samples - n_near
+        
+        # Gaussian noise sigma=0.01 for near surface
+        near_points = surface_points[:n_near] + np.random.normal(0, 0.01, (n_near, 3))
+        
+        # Uniform points in [-0.5, 0.5] (assuming normalized mesh)
+        uniform_points = np.random.uniform(-0.5, 0.5, (n_uniform, 3))
+        
+        query_points = np.vstack([near_points, uniform_points])
+        
+        # 3. Compute Signed Distance
+        # trimesh.proximity.signed_distance returns - inside, + outside?
+        # Check docs or convention. Usually Trimesh: positive outside, negative inside.
+        sdf = trimesh.proximity.signed_distance(mesh, query_points)
+        
+        # Convert to tensor
+        # Shape (N, 1)
+        query_points = torch.from_numpy(query_points).float()
+        sdf = torch.from_numpy(sdf).float().unsqueeze(1)
+        
+        return query_points, sdf

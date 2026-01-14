@@ -9,3 +9,12 @@ explicit_branch:
     template: "sphere"
     subdivisions: 2       # ~642 vertices
   gcn_hidden_dims: [ 256, 128, 128, 64 ]
+  use_layer_norm: true
+
+implicit_branch:
+  hidden_dim: 256
+  num_layers: 6
+  skip_connection_at: [3]
+  use_positional_encoding: true
+  pos_enc_levels: 6
+  out_dim: 1

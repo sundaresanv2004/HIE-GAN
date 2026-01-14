@@ -1,7 +1,7 @@
 batch_size: 64
 num_workers: 4
 
-epochs: 50
+epochs: 20
 
 optimizer:
   type: "adam"
