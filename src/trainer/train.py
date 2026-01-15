@@ -115,7 +115,10 @@ class Trainer:
             self.args, 
             self.logger
         )
-        self.train_loader, self.val_loader = self.dataset_loader.load(ShapeNetDataset)
+        self.logger.info("📊 Loading Dataset")
+        self.logger.info("=" * 70)
+        
+        self.train_loader, self.val_loader, self.test_loader = self.dataset_loader.load(ShapeNetDataset)
 
     def _build_models(self):
         self.logger.info("Initializing models...")
@@ -361,6 +364,28 @@ class Trainer:
         self.metrics_logger.log_epoch(epoch, {"val_loss": avg_val_loss})
         return avg_val_loss
 
+    def evaluate_test(self):
+        """Run evaluation on the test set after training completes"""
+        self.logger.info("Running evaluation on TEST set...")
+        
+        # Ensure test loader exists
+        if not hasattr(self, 'test_loader') or self.test_loader is None:
+            # Try to load it if not available
+             dataset_cfg, _, _ = load_configs(self.args.config_dir)
+             if self.args.dataset_config: dataset_cfg = load_yaml(self.args.dataset_config)
+             
+             # Manually trigger test loader loading if dataset class supports it
+             # Current implementation of DatasetLoader.load needs update to return test_loader
+             # checking if we can get it from self.dataset_loader logic
+             pass
+             
+        # For now, let's assume if it wasn't loaded in .load(), we can't easily get it without refactor.
+        # But wait, we saw "Found explicit test directory" in logs.
+        # Let's update DatasetLoader.load to return it first, or access it from here.
+        # Actually, let's check self.dataset_loader.load return.
+        pass
+
+
     def run(self):
         if self.args.dry_run:
             self.logger.info("🔍 Dry Run Mode")
@@ -368,7 +393,7 @@ class Trainer:
             self._build_models()
             self._build_optimizer()
             # Test validation output logic in dry run
-            self.train_loader, self.val_loader = self.dataset_loader.load(ShapeNetDataset)
+            self.train_loader, self.val_loader, self.test_loader = self.dataset_loader.load(ShapeNetDataset)
             self.validate(epoch=-1) # Dummy validation
             return
 
@@ -405,6 +430,10 @@ class Trainer:
         except KeyboardInterrupt:
             self.logger.warning("Interrupted!")
             self.save_checkpoint(epoch, avg_loss, False)
+            
+        # Automatic Testing after training
+        if not self.args.no_test:
+            self.evaluate_test()
 
     def save_checkpoint(self, epoch, loss, is_best):
         state = {
@@ -420,7 +449,69 @@ class Trainer:
         }
         self.ckpt_manager.save(state, epoch, loss, is_best, self.best_loss)
 
-# Backward compatibility
-def train_phase3(args):
-    trainer = Trainer(args)
-    trainer.run()
+    def evaluate_test(self):
+        """Run evaluation on the test set"""
+        self.logger.info("="*30)
+        self.logger.info("🧪 Running TEST Evaluation")
+        self.logger.info("="*30)
+        
+        # 1. Ensure models are loaded (handled by _build_models or _handle_checkpoint_loading)
+        if self.args.mode == "test":
+             # If invoked directly, we must load the best checkpoint
+             self._build_dataset()
+             self._build_models()
+             self._handle_checkpoint_loading()
+             # If the loader wasn't built by _build_dataset (e.g. test mode logic difference?), ensure it is
+             if not hasattr(self, 'test_loader') or self.test_loader is None:
+                 self.train_loader, self.val_loader, self.test_loader = self.dataset_loader.load(ShapeNetDataset)
+
+        if not hasattr(self, 'test_loader') or self.test_loader is None:
+             self.logger.warning("⚠️ No test loader available. Skipping test.")
+             return
+
+        self.encoder.eval()
+        self.explicit.eval()
+        self.implicit.eval()
+        self.fusion.eval()
+
+        test_loss = 0.0
+        output_dir = self.exp_dir / "test_outputs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        
+        temp_sphere = trimesh.creation.icosphere(subdivisions=self.model_cfg["explicit_branch"]["init_mesh"]["subdivisions"])
+
+        with torch.no_grad():
+            for i, batch in enumerate(tqdm(self.test_loader, desc="Testing")):
+                img, gt_pc, query_pts, query_sdf_gt = batch
+                
+                img = img.to(self.device, non_blocking=True)
+                gt_pc = gt_pc.to(self.device, non_blocking=True)
+                query_pts = query_pts.to(self.device, non_blocking=True)
+                query_sdf_gt = query_sdf_gt.to(self.device, non_blocking=True)
+                
+                feat = self.encoder(img)
+                pred_pc_exp = self.explicit(feat)
+                pred_sdf = self.implicit(feat, query_pts)
+                
+                with torch.enable_grad():
+                     pred_pc_fused = self.fusion(pred_pc_exp, self.implicit, feat)
+                
+                loss_sdf = self.sdf_loss_fn(pred_sdf, query_sdf_gt)
+                loss_cham_fused = chamfer_loss(pred_pc_fused, gt_pc)
+                
+                total_loss = loss_cham_fused + loss_sdf
+                test_loss += total_loss.item()
+                
+                # Save first 10 batches of samples (or limit)
+                if i < 10:
+                    for j in range(min(4, img.shape[0])):
+                        sample_idx = i * self.test_loader.batch_size + j
+                        
+                        # Save Fused
+                        v_fused = pred_pc_fused[j].cpu().numpy()
+                        mesh_fused = trimesh.Trimesh(vertices=v_fused, faces=temp_sphere.faces)
+                        mesh_fused.export(output_dir / f"test_{sample_idx}_fused.obj")
+                        
+        avg_test_loss = test_loss / len(self.test_loader)
+        self.logger.info(f"✅ Test Evaluation Complete | Avg Loss: {avg_test_loss:.6f}")
+        self.metrics_logger.log_epoch("test", {"test_loss": avg_test_loss})

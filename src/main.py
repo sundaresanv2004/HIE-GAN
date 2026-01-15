@@ -22,8 +22,8 @@ def parse_args():
     mode_group = parser.add_argument_group("Training Modes")
     mode_group.add_argument(
         "--mode", type=str, default="train",
-        choices=["train", "resume", "scratch", "generate", "plot"],
-        help="Execution mode: train/resume/scratch (training), generate (inference), plot (visualization)"
+        choices=["train", "test", "resume", "scratch", "generate", "plot"],
+        help="Execution mode: train/resume/scratch (training), test (evaluation), generate (inference), plot (visualization)"
     )
 
     # ===== Config Files =====
@@ -200,6 +200,10 @@ def parse_args():
         "--generate-model", action="store_true", default=True,
         help="Generate 3D models for classes after training"
     )
+    post_group.add_argument(
+        "--no-test", action="store_true", default=False,
+        help="Skip automatic testing after training"
+    )
 
     return parser.parse_args()
 
@@ -305,6 +309,9 @@ if __name__ == "__main__":
             generate_batch(args.config_dir, out_dir, encoder, explicit, device, model_cfg, num_samples=args.num_samples or 20)
 
     else:
-        # Training Modes (train, resume, scratch)
+        # Training Modes (train, resume, scratch) or Test Mode
         trainer = Trainer(args)
-        trainer.run()
+        if args.mode == "test":
+             trainer.evaluate_test()
+        else:
+             trainer.run()

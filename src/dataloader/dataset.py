@@ -60,14 +60,17 @@ class DatasetLoader:
             self._analyze_dataset(val_dataset, "Val")
 
         # Create dataloaders
-        self._create_dataloaders(train_dataset, val_dataset)
+        self._create_dataloaders(train_dataset, val_dataset, test_dataset)
 
         # Log summary
         self._log_summary()
 
         self.logger.info("=" * 70)
 
-        return self.train_loader, self.val_loader
+        if test_dataset:
+             return self.train_loader, self.val_loader, self.test_loader
+        else:
+             return self.train_loader, self.val_loader, None
 
     def _create_dataset(self, dataset_class, root_dir, split):
         """Create dataset instance"""
@@ -136,8 +139,8 @@ class DatasetLoader:
         else:
             return dataset, None
 
-    def _create_dataloaders(self, train_dataset, val_dataset):
-        """Create train and validation dataloaders"""
+    def _create_dataloaders(self, train_dataset, val_dataset, test_dataset=None):
+        """Create train, validation, and test dataloaders"""
         batch_size = self.train_cfg["batch_size"]
         num_workers = self.train_cfg["num_workers"]
         
@@ -163,14 +166,33 @@ class DatasetLoader:
                 num_workers=num_workers,
                 pin_memory=pin_memory,
                 persistent_workers=(num_workers > 0),
+                worker_init_fn=self.worker_init_fn,
+                collate_fn=self.collate_fn
             )
+            self.dataset_stats['val_batches'] = len(self.val_loader)
+            
+        if test_dataset:
+            self.test_loader = DataLoader(
+                test_dataset,
+                batch_size=batch_size,
+                shuffle=False, 
+                num_workers=num_workers,
+                pin_memory=pin_memory,
+                persistent_workers=(num_workers > 0),
+                worker_init_fn=self.worker_init_fn,
+                collate_fn=self.collate_fn
+            )
+            self.dataset_stats['test_batches'] = len(self.test_loader)
 
     def _log_summary(self):
         """Log dataset summary"""
         self.logger.info("📋 Dataset Summary:")
-        self.logger.info(f"   Train batches: {len(self.train_loader)}")
+        if self.train_loader:
+            self.logger.info(f"   Train batches: {len(self.train_loader)}")
         if self.val_loader:
              self.logger.info(f"   Val batches: {len(self.val_loader)}")
+        if self.test_loader:
+             self.logger.info(f"   Test batches: {len(self.test_loader)}")
 
 
 class ShapeNetDataset(torch.utils.data.Dataset):

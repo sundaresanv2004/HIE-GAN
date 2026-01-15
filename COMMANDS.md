@@ -64,7 +64,17 @@ python src/main.py --mode train --debug
   ```bash
   python src/main.py --mode scratch
   ```
+### Testing & Evaluation
+- **Automatic Testing**: By default, evaluation on the test set is run after training completes. To disable this:
+  ```bash
+  python src/main.py --mode train --no-test
+  ```
+- **Manual Testing**: Run evaluation on a pre-trained model:
+  ```bash
+  python src/main.py --mode test --checkpoint output/my_exp/checkpoints/checkpoint_best.pth
+  ```
 
+---
 ---
 
 ## 🧪 Inference & Generation
