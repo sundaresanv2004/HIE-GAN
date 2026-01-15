@@ -53,7 +53,7 @@ def generate_mesh_from_sdf(decoder, features, resolution=64, threshold=0.0, devi
     # 3. Marching Cubes
     # Check if we have both positive and negative values (surface crossing)
     if sdf_grid.min() > threshold or sdf_grid.max() < threshold:
-        print(f"Warning: No surface found at level {threshold} (SDF range: {sdf_grid.min():.4f} to {sdf_grid.max():.4f})")
+        # print(f"Warning: No surface found at level {threshold} (SDF range: {sdf_grid.min():.4f} to {sdf_grid.max():.4f})")
         return None
         
     try:

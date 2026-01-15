@@ -33,6 +33,7 @@ class DatasetLoader:
         val_dir = root_dir / "val"
         
         explicit_splits = train_dir.exists() and val_dir.exists()
+        test_dataset = None
         
         if explicit_splits:
             self.logger.info("✓ Found explicit train/val directories")
@@ -166,8 +167,6 @@ class DatasetLoader:
                 num_workers=num_workers,
                 pin_memory=pin_memory,
                 persistent_workers=(num_workers > 0),
-                worker_init_fn=self.worker_init_fn,
-                collate_fn=self.collate_fn
             )
             self.dataset_stats['val_batches'] = len(self.val_loader)
             
@@ -179,8 +178,6 @@ class DatasetLoader:
                 num_workers=num_workers,
                 pin_memory=pin_memory,
                 persistent_workers=(num_workers > 0),
-                worker_init_fn=self.worker_init_fn,
-                collate_fn=self.collate_fn
             )
             self.dataset_stats['test_batches'] = len(self.test_loader)
 
