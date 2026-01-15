@@ -19,6 +19,7 @@ class DatasetLoader:
 
         self.train_loader = None
         self.val_loader = None
+        self.test_loader = None
         self.dataset_stats = {}
 
     def load(self, dataset_class):
@@ -50,13 +51,16 @@ class DatasetLoader:
             train_dataset = self._create_dataset(dataset_class, root_dir=train_dir, split="train")
             val_dataset = self._create_dataset(dataset_class, root_dir=val_dir, split="val")
             
-            # Check for test split
-            test_dir = root_dir / "test"
-            if test_dir.exists():
-                self.logger.info("✓ Found explicit test directory")
-                test_dataset = self._create_dataset(dataset_class, root_dir=test_dir, split="test")
+            # Only check for test split if user hasn't disabled testing
+            if not self.args.no_test:
+                test_dir = root_dir / "test"
+                if test_dir.exists():
+                    self.logger.info("✓ Found explicit test directory")
+                    test_dataset = self._create_dataset(dataset_class, root_dir=test_dir, split="test")
+                else:
+                    self.logger.info("ℹ No explicit test directory found (this is OK with --no-test flag)")
             else:
-                self.logger.info("ℹ No explicit test directory found (use --no-test to skip test evaluation)")
+                self.logger.info("⏭️  Skipping test directory (--no-test flag set)")
         else:
             self.logger.info("⚠ No explicit splits found, loading from root and splitting randomly")
             full_dataset = self._create_dataset(dataset_class, root_dir=root_dir, split="all")
@@ -228,7 +232,7 @@ class DatasetLoader:
             self.logger.info(f"   Train batches: {len(self.train_loader)}")
         if self.val_loader:
              self.logger.info(f"   Val batches: {len(self.val_loader)}")
-        if self.test_loader:
+        if self.test_loader is not None:
              self.logger.info(f"   Test batches: {len(self.test_loader)}")
 
 
