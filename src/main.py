@@ -22,8 +22,8 @@ def parse_args():
     mode_group = parser.add_argument_group("Training Modes")
     mode_group.add_argument(
         "--mode", type=str, default="train",
-        choices=["train", "test", "resume", "scratch", "generate", "plot"],
-        help="Execution mode: train/resume/scratch (training), test (evaluation), generate (inference), plot (visualization)"
+        choices=["train", "test", "resume", "scratch", "generate", "plot", "dataset-check"],
+        help="Execution mode: train/resume/scratch (training), test (evaluation), generate (inference), plot (visualization), dataset-check (dataset validation)"
     )
 
     # ===== Config Files =====
@@ -159,6 +159,15 @@ def parse_args():
         "--output-dir", type=str, default=None,
         help="Explicit output directory for generation results"
     )
+    data_group.add_argument(
+        "--split", type=str, default=None,
+        choices=["train", "val", "test", "all"],
+        help="Dataset split to check (for dataset-check mode). 'all' checks all splits"
+    )
+    data_group.add_argument(
+        "--detailed", action="store_true",
+        help="Show detailed dataset statistics (for dataset-check mode)"
+    )
 
     # ===== Debugging and Testing =====
     debug_group = parser.add_argument_group("Debugging and Testing")
@@ -215,7 +224,73 @@ if __name__ == "__main__":
 
     args = parse_args()
 
-    if args.mode == "plot":
+    if args.mode == "dataset-check":
+        # Dataset Checking Mode
+        from scripts.check_dataset_structure import check_dataset_structure
+        
+        # Determine root directory
+        if args.data_root:
+            root_dir = Path(args.data_root)
+        else:
+            # Use default from configs
+            root_dir = Path("data/ShapeNetCore_V5")
+        
+        if not root_dir.exists():
+            print(f"❌ Dataset directory not found: {root_dir}")
+            sys.exit(1)
+        
+        # Determine which splits to check
+        splits_to_check = []
+        if args.split == "all" or args.split is None:
+            # Check all available splits
+            for split in ["train", "val", "test"]:
+                split_dir = root_dir / split
+                if split_dir.exists():
+                    splits_to_check.append((split, split_dir))
+                elif split_dir.parent.is_dir():
+                    # Maybe root is the split itself (no train/val/test subdirs)
+                    if not splits_to_check:  # Only add root once
+                        splits_to_check.append(("root", root_dir))
+                        break
+        else:
+            # Check specific split
+            split_dir = root_dir / args.split
+            if split_dir.exists():
+                splits_to_check.append((args.split, split_dir))
+            else:
+                print(f"❌ Split directory not found: {split_dir}")
+                sys.exit(1)
+        
+        # Check each split
+        all_stats = {}
+        for split_name, split_path in splits_to_check:
+            print(f"\n{'='*80}")
+            print(f"Checking: {split_name.upper()} split")
+            print(f"{'='*80}")
+            stats = check_dataset_structure(str(split_path), create_report=False)
+            if stats:
+                all_stats[split_name] = stats
+        
+        # Print overall summary if multiple splits
+        if len(all_stats) > 1:
+            print(f"\n\n{'='*80}")
+            print("📊 OVERALL DATASET SUMMARY")
+            print(f"{'='*80}")
+            
+            for split_name, stats in all_stats.items():
+                total_valid = sum(s["valid"] for s in stats.values())
+                total_objects = sum(s["total"] for s in stats.values())
+                print(f"\n{split_name.upper()}: {total_valid}/{total_objects} valid objects")
+                
+                if args.detailed:
+                    for class_id, class_stats in stats.items():
+                        print(f"  {class_stats['name']:10} - {class_stats['valid']:4}/{class_stats['total']:4} objects")
+        
+        print(f"\n{'='*80}")
+        print("✅ Dataset structure check complete!")
+        print(f"{'='*80}\n")
+
+    elif args.mode == "plot":
         # Plotting Mode
         # Determine CSV path
         if args.log_dir:

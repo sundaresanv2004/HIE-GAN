@@ -50,6 +50,7 @@ tmp/
 temp/
 .cache/
 .DS_Store
+**/.DS_Store
 *.tmp
 *.bak
 *.old

@@ -1,19 +1,67 @@
+# Dataset Configuration for HIE-GAN
+#
+# This file defines all dataset-related parameters including paths,
+# class selections, and data loading specifications.
+
+# Dataset Root
 root_dir: "data/ShapeNetCore_V5"
 
+# ShapeNet Classes
+# Each class is identified by its synset ID
+# Currently active classes (uncomment to enable more):
 classes:
-  - "02691156" # Airplane
-  - "02958343" # Car
-  - "03001627" # Chair
-  - "04379243" # Table
-  # - "03636649" # Lamp
+  - "02691156"  # Airplane
+  - "02958343"  # Car
+  - "03001627"  # Chair
+  - "04379243"  # Table
+  # - "03636649"  # Lamp (optional, uncomment to include)
 
+# Class Metadata
+class_names:
+  "02691156": "Airplane"
+  "02958343": "Car"
+  "03001627": "Chair"
+  "03636649": "Lamp"
+  "04379243": "Table"
+
+# Image Configuration
 image:
-  channels: 3
-  size: 224
+  channels: 3        # RGB images
+  size: 224          # Input image size (224x224)
+  # Available views per class (for reference):
+  # Airplane: [00, 03, 04, 06, 07, 09, 11, 14, 15]
+  # Car:      [00, 03, 04, 06, 07, 09, 11, 14, 15]
+  # Chair:    [00, 03, 06, 07, 09, 11, 12]
+  # Lamp:     [00, 03, 06, 07, 08, 09, 11, 13, 15]
+  # Table:    [00, 03, 06, 07, 09, 11, 13, 15]
 
+# SDF (Signed Distance Field) Configuration
+# For implicit branch training
 sdf:
-  num_samples: 2048
+  num_samples: 2048  # Number of query points to sample per object
+  # Sample distribution:
+  # - 50% near surface (±sigma)
+  # - 50% uniform in space
 
+# Point Cloud Configuration
 pointcloud:
-  filename: "model_normalized.ply"
-  max_points: 4096
+  filename: "model_normalized.ply"  # Ground truth mesh filename
+  max_points: 4096                  # Maximum points to sample from mesh
+  # Purpose: Supervision for explicit branch via Chamfer distance
+
+# Data Splits
+# Automatically detected from directory structure:
+# - root_dir/train/  (if exists)
+# - root_dir/val/    (if exists)
+# - root_dir/test/   (if exists)
+#
+# If no split subdirectories found, dataset is auto-split with:
+# val_split: 0.1  # 10% for validation
+# test_split: 0.1 # 10% for test (if not using --no-test)
+
+# Data Augmentation (future enhancement)
+# augmentation:
+#   enabled: false
+#   random_rotation: true
+#   random_flip: false
+#   color_jitter: false
