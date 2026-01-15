@@ -29,6 +29,16 @@ class DatasetLoader:
 
         # Determine if we have explicit train/val/test folders
         root_dir = Path(self.dataset_cfg["root_dir"])
+        
+        # Validate root directory exists
+        if not root_dir.exists():
+            raise FileNotFoundError(
+                f"Dataset root directory not found: {root_dir}\n"
+                f"Please check your --data-root path or configs/dataset.yaml"
+            )
+        
+        self.logger.info(f"📁 Dataset root: {root_dir}")
+        
         train_dir = root_dir / "train"
         val_dir = root_dir / "val"
         
@@ -45,20 +55,50 @@ class DatasetLoader:
             if test_dir.exists():
                 self.logger.info("✓ Found explicit test directory")
                 test_dataset = self._create_dataset(dataset_class, root_dir=test_dir, split="test")
-                # We don't return test_dataset here for now as Trainer expects 2, 
-                # but we can store it or extend return.
-                # For now let's just log it.
             else:
-                self.logger.info("ℹ No explicit test directory found")
+                self.logger.info("ℹ No explicit test directory found (use --no-test to skip test evaluation)")
         else:
             self.logger.info("⚠ No explicit splits found, loading from root and splitting randomly")
             full_dataset = self._create_dataset(dataset_class, root_dir=root_dir, split="all")
+            
+            # Validate dataset is not empty
+            if len(full_dataset) == 0:
+                raise ValueError(
+                    f"No objects found in dataset!\n"
+                    f"Root directory: {root_dir}\n\n"
+                    f"Expected structure:\n"
+                    f"  {root_dir}/\n"
+                    f"    <class_id>/\n"
+                    f"      <object_id>/\n"
+                    f"        images/\n"
+                    f"          *.png or *.jpg\n"
+                    f"        model_normalized.ply\n\n"
+                    f"OR with explicit splits:\n"
+                    f"  {root_dir}/\n"
+                    f"    train/\n"
+                    f"      <class_id>/<object_id>/...\n"
+                    f"    val/\n"
+                    f"      <class_id>/<object_id>/...\n\n"
+                    f"Classes configured: {self.dataset_cfg['classes']}"
+                )
+            
             train_dataset, val_dataset = self._split_dataset(full_dataset)
+        
+        # Validate train dataset is not empty
+        if len(train_dataset) == 0:
+            raise ValueError(
+                f"Train dataset is empty!\n"
+                f"Please check your data path and structure.\n"
+                f"Root: {root_dir}\n"
+                f"Classes: {self.dataset_cfg['classes']}"
+            )
         
         # Analyze datasets
         self._analyze_dataset(train_dataset, "Train")
         if val_dataset:
             self._analyze_dataset(val_dataset, "Val")
+        if test_dataset:
+            self._analyze_dataset(test_dataset, "Test")
 
         # Create dataloaders
         self._create_dataloaders(train_dataset, val_dataset, test_dataset)
@@ -209,19 +249,31 @@ class ShapeNetDataset(torch.utils.data.Dataset):
 
         # Collecting all object paths
         if not self.root_dir.exists():
-            print(f"Dataset root not found: {self.root_dir}")
+            print(f"⚠️  Dataset root not found: {self.root_dir}")
             return
 
         for class_id in self.classes:
             class_dir = self.root_dir / class_id
             if not class_dir.exists():
+                print(f"⚠️  Class directory not found: {class_dir} (class_id: {class_id})")
                 continue
             
+            objects_found = 0
             for obj_name in os.listdir(class_dir):
                 obj_path = class_dir / obj_name
                 if obj_path.is_dir():
-                    if (obj_path / "images").exists() and (obj_path / self.pc_filename).exists():
+                    has_images = (obj_path / "images").exists()
+                    has_pc = (obj_path / self.pc_filename).exists()
+                    
+                    if has_images and has_pc:
                         self.object_paths.append(str(obj_path))
+                        objects_found += 1
+                    elif not has_images:
+                        print(f"⚠️  Missing 'images' folder in: {obj_path.name}")
+                    elif not has_pc:
+                        print(f"⚠️  Missing '{self.pc_filename}' in: {obj_path.name}")
+            
+            print(f"✓ Found {objects_found} objects for class {class_id}")
 
         # Standard ImageNet normalization
         from torchvision import transforms
