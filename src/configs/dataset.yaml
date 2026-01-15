@@ -4,8 +4,8 @@ classes:
   - "02691156" # Airplane
   - "02958343" # Car
   - "03001627" # Chair
-  - "03636649" # Lamp
   - "04379243" # Table
+  # - "03636649" # Lamp
 
 image:
   channels: 3

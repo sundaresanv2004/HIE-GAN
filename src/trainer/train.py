@@ -432,9 +432,18 @@ class Trainer:
                     if not self.args.no_save:
                         self.save_checkpoint(epoch, avg_val_loss, is_best)
 
+
         except KeyboardInterrupt:
             self.logger.warning("Interrupted!")
             self.save_checkpoint(epoch, avg_loss, False)
+            
+        # Automatic Graph Generation
+        if self.args.generate_graph:
+            self.logger.info("📊 Generating training graphs...")
+            from utils.plotter import plot_training_graphs
+            success = plot_training_graphs(self.exp_dir)
+            if success:
+                self.logger.info("✅ Training graphs generated successfully")
             
         # Automatic Testing after training
         if not self.args.no_test:
