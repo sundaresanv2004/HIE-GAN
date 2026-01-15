@@ -82,6 +82,11 @@ class Trainer:
         return load_configs(config_dir=self.args.config_dir)
 
     def _apply_overrides(self):
+        # Dataset path override
+        if self.args.data_root:
+            self.dataset_cfg["root_dir"] = self.args.data_root
+        
+        # Training config overrides
         if self.args.epochs:
             self.train_cfg["epochs"] = int(self.args.epochs)
         if self.args.batch_size:
