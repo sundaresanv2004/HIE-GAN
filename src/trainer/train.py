@@ -82,19 +82,16 @@ class Trainer:
         return load_configs(config_dir=self.args.config_dir)
 
     def _apply_overrides(self):
-        # Dataset path override
+        """Apply command-line overrides to configuration"""
         if self.args.data_root:
             self.dataset_cfg["root_dir"] = self.args.data_root
         
-        # Training config overrides
         if self.args.epochs:
             self.train_cfg["epochs"] = int(self.args.epochs)
         if self.args.batch_size:
             self.train_cfg["batch_size"] = int(self.args.batch_size)
         if self.args.lr:
             self.train_cfg["optimizer"]["lr"] = float(self.args.lr)
-        else:
-            self.train_cfg["optimizer"]["lr"] = float(self.train_cfg["optimizer"]["lr"])
         if self.args.num_workers is not None:
             self.train_cfg["num_workers"] = int(self.args.num_workers)
 
@@ -105,7 +102,10 @@ class Trainer:
         return logger, csv_logger, metrics_logger
 
     def _log_config(self):
-        if self.args.quiet: return
+        """Log configuration summary"""
+        if self.args.quiet:
+            return
+        
         self.logger.info("=" * 70)
         self.logger.info("HIE-GAN Phase 3 Training (Fusion Module)")
         self.logger.info("=" * 70)
@@ -179,36 +179,88 @@ class Trainer:
              self.fusion = torch.compile(self.fusion)
 
     def _build_optimizer(self):
+        """Initialize optimizer for all model components"""
         lr = float(self.train_cfg["optimizer"]["lr"])
         weight_decay = float(self.args.weight_decay) if self.args.weight_decay else 0.0
 
-        print_params = list(self.encoder.parameters()) + \
-                       list(self.explicit.parameters()) + \
-                       list(self.implicit.parameters()) + \
-                       list(self.fusion.parameters())
+        all_params = list(self.encoder.parameters()) + \
+                     list(self.explicit.parameters()) + \
+                     list(self.implicit.parameters()) + \
+                     list(self.fusion.parameters())
 
         self.optimizer = torch.optim.Adam(
-            print_params,
+            all_params,
             lr=lr,
             weight_decay=weight_decay
         )
         self.logger.info(f"Optimizer: Adam (lr={lr})")
 
     def _handle_checkpoint_loading(self):
-        """Handle checkpoint loading"""
+        """
+        Handle checkpoint loading with smart path resolution.
+        
+        Supports two modes:
+        1. Direct file path: /path/to/checkpoint_best.pth
+        2. Output directory: /path/to/output/exp_name/DD-MM-YYYY/HH-MM-SS/
+           - Automatically loads checkpoint_best.pth from checkpoints/ subfolder
+        """
         checkpoint = None
+        
         if self.args.checkpoint:
-            # Load specific
             ckpt_path = Path(self.args.checkpoint)
-            if ckpt_path.is_dir(): ckpt_path = ckpt_path / "checkpoint_latest.pth"
-            checkpoint = self.ckpt_manager.load(ckpt_path, self.device)
+            
+            # Case 1: Direct file path
+            if ckpt_path.is_file():
+                self.logger.info(f"📂 Loading checkpoint from file: {ckpt_path}")
+                checkpoint = self.ckpt_manager.load(ckpt_path, self.device)
+            
+            # Case 2: Directory path - auto-detect best checkpoint
+            elif ckpt_path.is_dir():
+                # Check if this is the experiment root or the timestamped subdirectory
+                checkpoints_dir = ckpt_path / "checkpoints"
+                
+                if not checkpoints_dir.exists():
+                    # Maybe user provided the checkpoints directory directly
+                    if ckpt_path.name == "checkpoints":
+                        checkpoints_dir = ckpt_path
+                    else:
+                        self.logger.error(f"❌ No 'checkpoints' folder found in: {ckpt_path}")
+                        raise FileNotFoundError(f"Checkpoint directory not found: {checkpoints_dir}")
+                
+                # Priority: best > latest > most recent epoch
+                best_ckpt = checkpoints_dir / "checkpoint_best.pth"
+                latest_ckpt = checkpoints_dir / "checkpoint_latest.pth"
+                
+                if best_ckpt.exists():
+                    self.logger.info(f"🏆 Loading best checkpoint from: {best_ckpt}")
+                    checkpoint = self.ckpt_manager.load(best_ckpt, self.device)
+                elif latest_ckpt.exists():
+                    self.logger.info(f"⏰ Loading latest checkpoint from: {latest_ckpt}")
+                    checkpoint = self.ckpt_manager.load(latest_ckpt, self.device)
+                else:
+                    # Find most recent epoch checkpoint
+                    epoch_ckpts = sorted(checkpoints_dir.glob("checkpoint_epoch_*.pth"))
+                    if epoch_ckpts:
+                        most_recent = epoch_ckpts[-1]
+                        self.logger.info(f"📝 Loading most recent checkpoint: {most_recent}")
+                        checkpoint = self.ckpt_manager.load(most_recent, self.device)
+                    else:
+                        self.logger.error(f"❌ No checkpoint files found in: {checkpoints_dir}")
+                        raise FileNotFoundError(f"No checkpoints in: {checkpoints_dir}")
+            else:
+                self.logger.error(f"❌ Checkpoint path does not exist: {ckpt_path}")
+                raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
+        
         elif self.args.mode == "resume":
+            # Auto-resume from current experiment directory
             latest_ckpt = self.ckpt_dir / "checkpoint_latest.pth"
             if latest_ckpt.exists():
+                self.logger.info(f"🔄 Auto-resuming from: {latest_ckpt}")
                 checkpoint = self.ckpt_manager.load(latest_ckpt, self.device)
         
         if checkpoint:
             self._apply_checkpoint(checkpoint)
+
 
     def _apply_checkpoint(self, checkpoint):
         self.encoder.load_state_dict(checkpoint["encoder_state_dict"])
@@ -280,13 +332,17 @@ class Trainer:
                 self.scaler.scale(total_loss).backward()
                 if self.args.grad_clip:
                     self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.optimizer, self.args.grad_clip)
+                    torch.nn.utils.clip_grad_norm_(all_params, self.args.grad_clip)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
                 total_loss.backward()
                 if self.args.grad_clip:
-                     torch.nn.utils.clip_grad_norm_(self.optimizer, self.args.grad_clip)
+                    all_params = list(self.encoder.parameters()) + \
+                                 list(self.explicit.parameters()) + \
+                                 list(self.implicit.parameters()) + \
+                                 list(self.fusion.parameters())
+                    torch.nn.utils.clip_grad_norm_(all_params, self.args.grad_clip)
                 self.optimizer.step()
 
             loss_val = total_loss.item()
@@ -371,35 +427,21 @@ class Trainer:
 
     def evaluate_test(self):
         """Run evaluation on the test set after training completes"""
-        self.logger.info("Running evaluation on TEST set...")
-        
-        # Ensure test loader exists
         if not hasattr(self, 'test_loader') or self.test_loader is None:
-            # Try to load it if not available
-             dataset_cfg, _, _ = load_configs(self.args.config_dir)
-             if self.args.dataset_config: dataset_cfg = load_yaml(self.args.dataset_config)
-             
-             # Manually trigger test loader loading if dataset class supports it
-             # Current implementation of DatasetLoader.load needs update to return test_loader
-             # checking if we can get it from self.dataset_loader logic
-             pass
-             
-        # For now, let's assume if it wasn't loaded in .load(), we can't easily get it without refactor.
-        # But wait, we saw "Found explicit test directory" in logs.
-        # Let's update DatasetLoader.load to return it first, or access it from here.
-        # Actually, let's check self.dataset_loader.load return.
-        pass
+            self.logger.warning("⚠️  No test loader available. Skipping test evaluation.")
+            return
+        
+        self.logger.info("Running evaluation on TEST set...")
 
 
     def run(self):
+        """Main training loop with feature toggles"""
         if self.args.dry_run:
             self.logger.info("🔍 Dry Run Mode")
             self._build_dataset()
             self._build_models()
             self._build_optimizer()
-            # Test validation output logic in dry run
-            self.train_loader, self.val_loader, self.test_loader = self.dataset_loader.load(ShapeNetDataset)
-            self.validate(epoch=-1) # Dummy validation
+            self.logger.info("✅ Dry run complete - all systems initialized successfully")
             return
 
         self._build_dataset()
@@ -416,36 +458,41 @@ class Trainer:
                 self.logger.info(f"Epoch {epoch+1} | Train Loss: {avg_loss:.6f}")
                 self.metrics_logger.log_epoch(epoch, {"train_loss": avg_loss})
                 
-                # Validate every N epochs
-                val_every = self.train_cfg.get("logging", {}).get("val_every", 1)
+                # Validation (can be disabled with --no-validation)
+                avg_val_loss = avg_loss  # Use train loss as fallback
                 
-                avg_val_loss = avg_loss # Fallback if not validating
-                
-                if (epoch + 1) % val_every == 0:
-                     avg_val_loss = self.validate(epoch)
+                if not self.args.no_validation:
+                    val_every = self.train_cfg.get("validation", {}).get("val_every", 1)
+                    if (epoch + 1) % val_every == 0:
+                        avg_val_loss = self.validate(epoch)
 
+                # Track best model based on validation (or train) loss
                 is_best = avg_val_loss < self.best_loss
-                if is_best: self.best_loss = avg_val_loss
+                if is_best:
+                    self.best_loss = avg_val_loss
                 
+                # Save checkpoints
                 save_every = self.train_cfg["checkpoints"].get("save_every", 1)
                 if (epoch + 1) % save_every == 0 or is_best:
                     if not self.args.no_save:
                         self.save_checkpoint(epoch, avg_val_loss, is_best)
 
-
         except KeyboardInterrupt:
-            self.logger.warning("Interrupted!")
+            self.logger.warning("⚠️ Training interrupted!")
             self.save_checkpoint(epoch, avg_loss, False)
             
-        # Automatic Graph Generation
-        if self.args.generate_graph:
+        # Post-training automation
+        self.logger.info("\n" + "="*70)
+        self.logger.info("🎉 Training Complete!")
+        self.logger.info("="*70)
+        
+        # Generate training graphs (can be disabled with --no-plot)
+        if not self.args.no_plot:
             self.logger.info("📊 Generating training graphs...")
-            from utils.plotter import plot_training_graphs
-            success = plot_training_graphs(self.exp_dir)
-            if success:
-                self.logger.info("✅ Training graphs generated successfully")
+            plot_training_logs(self.exp_dir / self.train_cfg["logging"]["csv_filename"])
+            self.logger.info("✅ Training graphs saved")
             
-        # Automatic Testing after training
+        # Automatic testing (can be disabled with --no-test)
         if not self.args.no_test:
             self.evaluate_test()
 

@@ -198,23 +198,106 @@ def parse_args():
         "--val-every", type=int, default=None,
         help="Run validation every N epochs"
     )
+    val_group.add_argument(
+        "--no-validation", action="store_true",
+        help="Disable validation during training"
+    )
 
     # ===== Post-Training Automation =====
     post_group = parser.add_argument_group("Post-Training Automation")
     post_group.add_argument(
-        "--generate-graph", action="store_true", default=True,
-        help="Generate training graphs (Loss vs Epoch) after training"
+        "--no-plot", action="store_true",
+        help="Disable automatic graph plotting after training"
     )
     post_group.add_argument(
-        "--generate-model", action="store_true", default=True,
-        help="Generate 3D models for classes after training"
-    )
-    post_group.add_argument(
-        "--no-test", action="store_true", default=False,
+        "--no-test", action="store_true",
         help="Skip automatic testing after training"
     )
 
     return parser.parse_args()
+
+
+def resolve_checkpoint_path(checkpoint_arg):
+    """
+    Smart checkpoint path resolution.
+    
+    Supports:
+    1. Direct file: /path/to/checkpoint_best.pth
+    2. Output directory: /path/to/exp/DD-MM-YYYY/HH-MM-SS/ (auto-finds best)
+    3. Checkpoints directory: /path/to/exp/DD-MM-YYYY/HH-MM-SS/checkpoints/
+    
+    Returns: Path to checkpoint file
+    """
+    ckpt_path = Path(checkpoint_arg)
+    
+    # Case 1: Direct file
+    if ckpt_path.is_file():
+        return ckpt_path
+    
+    # Case 2: Directory - find best checkpoint
+    if ckpt_path.is_dir():
+        checkpoints_dir = ckpt_path / "checkpoints"
+        
+        # Edge case: user provided checkpoints/ dir directly
+        if not checkpoints_dir.exists() and ckpt_path.name == "checkpoints":
+            checkpoints_dir = ckpt_path
+        
+        if not checkpoints_dir.exists():
+            raise FileNotFoundError(f"No 'checkpoints' folder in: {ckpt_path}")
+        
+        # Priority: best > latest > most recent epoch
+        for ckpt_name in ["checkpoint_best.pth", "checkpoint_latest.pth"]:
+            ckpt_file = checkpoints_dir / ckpt_name
+            if ckpt_file.exists():
+                print(f"🏆 Found checkpoint: {ckpt_file}")
+                return ckpt_file
+        
+        # Fallback: most recent epoch
+        epoch_ckpts = sorted(checkpoints_dir.glob("checkpoint_epoch_*.pth"))
+        if epoch_ckpts:
+            print(f"📝 Using most recent: {epoch_ckpts[-1]}")
+            return epoch_ckpts[-1]
+        
+        raise FileNotFoundError(f"No checkpoints found in: {checkpoints_dir}")
+    
+    raise FileNotFoundError(f"Path does not exist: {ckpt_path}")
+
+
+def resolve_log_path(log_arg):
+    """
+    Smart log path resolution.
+    
+    Supports:
+    1. Direct CSV file: /path/to/training.csv
+    2. Log file: /path/to/training.log (converts to .csv)
+    3. Output directory: /path/to/exp/DD-MM-YYYY/HH-MM-SS/ (auto-finds CSV)
+    
+    Returns: Path to CSV log file
+    """
+    path = Path(log_arg)
+    
+    # Case 1: Direct file
+    if path.is_file():
+        if path.suffix == ".log":
+            # Try to find CSV sibling
+            csv_path = path.with_suffix(".csv")
+            if csv_path.exists():
+                print(f"ℹ️  Auto-corrected .log → .csv")
+                return csv_path
+        return path
+    
+    # Case 2: Directory - find CSV log
+    if path.is_dir():
+        # Common CSV names
+        for csv_name in ["training.csv", "phase1_train.csv", "training_log.csv"]:
+            csv_path = path / csv_name
+            if csv_path.exists():
+                print(f"📊 Found log: {csv_path}")
+                return csv_path
+        
+        raise FileNotFoundError(f"No CSV log found in: {path}")
+    
+    raise FileNotFoundError(f"Path does not exist: {path}")
 
 
 if __name__ == "__main__":
@@ -291,97 +374,70 @@ if __name__ == "__main__":
         print(f"{'='*80}\n")
 
     elif args.mode == "plot":
-        # Plotting Mode
-        # Determine CSV path
-        if args.log_dir:
-            path = Path(args.log_dir)
-            if path.is_file():
-                if path.suffix == ".log":
-                     # Likely user pointed to text log, try to find csv sibling
-                     csv_candidate = path.with_suffix(".csv")
-                     if csv_candidate.exists():
-                         print(f"ℹ Auto-correcting {path.name} -> {csv_candidate.name}")
-                         csv_path = csv_candidate
-                     else:
-                         csv_path = path # Let it fail or user named it weirdly
-                else:
-                    csv_path = path
-            elif path.is_dir():
-                # Look for common csv names
-                candidates = ["phase1_train.csv", "training_log.csv"]
-                found = False
-                for c in candidates:
-                    p = path / c
-                    if p.exists():
-                        csv_path = p
-                        found = True
-                        break
-                if not found:
-                    print(f"❌ Could not find CSV log in {path}")
-                    print(f"   Checked: {candidates}")
-                    sys.exit(1)
-            else:
-                print(f"❌ Path not found: {path}")
-                sys.exit(1)
-        else:
-            # Default location
-            csv_path = Path("output/latest/phase1_train.csv")
-            if not csv_path.exists():
-                 csv_path = Path("output/latest/training_log.csv")
+        # Plotting Mode with smart path resolution
+        if not args.log_dir:
+            print("❌ --log-dir is required for plotting")
+            print("Usage: python src/main.py --mode plot --log-dir output/exp/DATE/TIME")
+            sys.exit(1)
         
-        if csv_path.exists():
-             print(f"Plotting log: {csv_path}")
-             plot_training_logs(csv_path)
-        else:
-             print(f"❌ File not found: {csv_path}")
-             print("Usage: python src/main.py --mode plot --log-dir path/to/phase1_train.csv")
+        try:
+            csv_path = resolve_log_path(args.log_dir)
+            print(f"📈 Plotting training logs from: {csv_path}")
+            plot_training_logs(csv_path)
+            print("✅ Graphs generated successfully")
+        except FileNotFoundError as e:
+            print(f"❌ {e}")
+            sys.exit(1)
 
     elif args.mode == "generate":
-        # Generation Mode
+        # Generation Mode with smart path resolution
         if not args.checkpoint:
-            print("❌ --checkpoint is required for generation--")
+            print("❌ --checkpoint is required for generation")
+            print("Usage: python src/main.py --mode generate --checkpoint output/exp/DATE/TIME")
             sys.exit(1)
+        
+        try:
+            # Resolve checkpoint path
+            ckpt_path = resolve_checkpoint_path(args.checkpoint)
+            print(f"🎨 Loading model from: {ckpt_path}")
             
-        print(f"Loading model from {args.checkpoint}...")
-        
-        # Setup device for generation
-        if args.device == "auto":
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        else:
-            device = torch.device(args.device)
-
-        # Load model components
-        # We need config dir. 
-        # Note: generate.py's load_model expects these params
-        encoder, explicit, model_cfg = load_model(args.config_dir, args.checkpoint, device)
-        
-        # Determine base directory from checkpoint path
-        ckpt_path = Path(args.checkpoint)
-        if ckpt_path.parent.name == "checkpoints":
-             base_exp_dir = ckpt_path.parent.parent
-        else:
-             base_exp_dir = ckpt_path.parent
-
-        if args.output_dir:
-            out_dir = Path(args.output_dir)
-        elif args.exp_name:
-            # Treat exp_name as subdirectory name within the experiment folder
-            out_dir = base_exp_dir / args.exp_name
-        else:
-            # Default
-            out_dir = base_exp_dir / "generated_samples"
-        
-        print(f"Output directory: {out_dir}")
-        
-        if args.image:
-            # Single Image
-            print(f"Generating single sample from {args.image}...")
-            path = generate_single(args.image, out_dir, encoder, explicit, device, model_cfg)
-            print(f"✓ Saved: {path}")
-        else:
-            # Batch
-            print(f"Generating batch samples...")
-            generate_batch(args.config_dir, out_dir, encoder, explicit, device, model_cfg, num_samples=args.num_samples or 20)
+            # Setup device
+            if args.device == "auto":
+                device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            else:
+                device = torch.device(args.device)
+            
+            # Load model
+            encoder, explicit, model_cfg = load_model(args.config_dir, str(ckpt_path), device)
+            
+            # Determine output directory
+            if ckpt_path.parent.name == "checkpoints":
+                base_exp_dir = ckpt_path.parent.parent
+            else:
+                base_exp_dir = ckpt_path.parent
+            
+            if args.output_dir:
+                out_dir = Path(args.output_dir)
+            elif args.exp_name:
+                out_dir = base_exp_dir / args.exp_name
+            else:
+                out_dir = base_exp_dir / "generated_samples"
+            
+            print(f"📁 Output directory: {out_dir}")
+            
+            # Generate
+            if args.image:
+                print(f"Generating from image: {args.image}")
+                path = generate_single(args.image, out_dir, encoder, explicit, device, model_cfg)
+                print(f"✅ Saved: {path}")
+            else:
+                print(f"Generating batch samples...")
+                generate_batch(args.config_dir, out_dir, encoder, explicit, device, model_cfg, num_samples=args.num_samples or 20)
+                print("✅ Batch generation complete")
+                
+        except FileNotFoundError as e:
+            print(f"❌ {e}")
+            sys.exit(1)
 
     else:
         # Training Modes (train, resume, scratch) or Test Mode

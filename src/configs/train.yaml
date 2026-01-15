@@ -1,28 +1,56 @@
+# Training Configuration for HIE-GAN
+
+# Default output root directory (can be overridden via --output-root)
+output_root: "output"
+
+# Training hyperparameters
 batch_size: 64
 num_workers: 4
-
 epochs: 20
 
+# Optimizer configuration
 optimizer:
   type: "adam"
   lr: 1e-4
   weight_decay: 0.0
 
+# Learning rate scheduler
 scheduler:
   use_scheduler: false
   step_size: 20
   gamma: 0.1
 
+# Loss weights
 loss:
   chamfer_weight: 1.0
+  sdf_weight: 1.0
+  smoothness_weight: 0.1
+  edge_weight: 0.1
 
+# Validation configuration
+validation:
+  enabled: true          # Can be disabled with --no-validation
+  val_every: 1           # Run validation every N epochs
+  save_samples: 5        # Number of samples to save during validation
+
+# Testing configuration
+testing:
+  enabled: true          # Can be disabled with --no-test
+  save_samples: 10       # Number of test samples to save
+
+# Post-training automation
+post_training:
+  generate_graph: true   # Can be disabled with --no-plot
+  generate_samples: false # Generate sample meshes after training
+
+# Logging configuration (paths are created dynamically based on exp_name and timestamp)
 logging:
-  log_dir: "output/logs"
-  log_filename: "phase1_train.log"
-  csv_filename: "phase1_train.csv"
+  log_filename: "training.log"
+  csv_filename: "training.csv"
   log_every_n_steps: 10
 
+# Checkpoint configuration (paths are created dynamically)
 checkpoints:
-  dir: "output/checkpoints"
-  filename: "phase1_explicit.pt"
-  resume: true
+  save_every: 1          # Save checkpoint every N epochs
+  keep_last: 3           # Keep last N checkpoints (older ones are deleted)
+  resume: true           # Auto-resume from latest checkpoint if available
