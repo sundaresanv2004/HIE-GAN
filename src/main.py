@@ -140,6 +140,10 @@ def parse_args():
         help="Override dataset root directory"
     )
     data_group.add_argument(
+        "--output-root", type=str, default="output",
+        help="Base directory for experiment outputs (default: output)"
+    )
+    data_group.add_argument(
         "--num-samples", type=int, default=None,
         help="Limit dataset to N samples (for testing/generation)"
     )

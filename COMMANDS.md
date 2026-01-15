@@ -9,19 +9,22 @@ This guide provides a comprehensive list of commands and options for running the
 python src/main.py --mode train --exp-name my_experiment
 ```
 
-### Resume training
+### Phase 3 Training (Fusion Module)
+To train the full model with Explicit, Implicit, and Fusion branches:
 ```bash
-python src/main.py --mode train --resume-from output/my_experiment/checkpoints/checkpoint_latest.pth
+python src/main.py --mode train --exp-name phase3_fusion
 ```
 
-### Generate 3D Meshes from Images
+### Verification (Overfit Test)
+Run a quick test on a few samples to verify gradient flow and pipeline integrity:
 ```bash
-python src/main.py --mode generate \
-    --checkpoint output/my_experiment/checkpoints/checkpoint_best.pth \
-    --image assets/chair.png
+python src/main.py --mode train \
+    --exp-name verification_test \
+    --epochs 10 \
+    --batch-size 2 \
+    --num-samples 4 \
+    --inspect-data
 ```
-
----
 
 ## 🛠 Training Commands
 
@@ -45,7 +48,7 @@ python src/main.py --mode train \
 ### Debug / Dry Run
 Useful for verifying setup without waiting for training.
 ```bash
-# Dry run: Initialize everything but exit before training loop
+# Dry run: Initialize everything, check dataset, and exit before training loop
 python src/main.py --mode train --dry-run
 
 # Debug mode: Run with small data subset and verbose logging
@@ -67,11 +70,11 @@ python src/main.py --mode train --debug
 ## 🧪 Inference & Generation
 
 ### Single Image Inference
-Generate a 3D mesh from a single input image.
+Generate explicit, implicit, and fused meshes from a single input image.
 ```bash
 python src/main.py --mode generate \
-    --checkpoint <path_to_checkpoint> \
-    --image <path_to_image> \
+    --checkpoint output/phase3_fusion/checkpoints/checkpoint_best.pth \
+    --image assets/chair.png \
     --output-dir results/
 ```
 
@@ -79,8 +82,23 @@ python src/main.py --mode generate \
 Generate meshes for a random batch of validation images.
 ```bash
 python src/main.py --mode generate \
-    --checkpoint <path_to_checkpoint> \
+    --checkpoint output/phase3_fusion/checkpoints/checkpoint_best.pth \
     --num-samples 10
+```
+
+---
+
+## 📂 Output Structure
+Experiments are organized by name, date, and time:
+```
+output/
+  └── exp_name/
+      └── DD-MM-YYYY/
+          └── HH-MM-SS/
+              ├── checkpoints/
+              ├── logs/
+              ├── metrics.json
+              └── val_outputs/   <-- Generated mesh samples during training
 ```
 
 ---
@@ -90,7 +108,7 @@ python src/main.py --mode generate \
 ### Plot Training Loss
 Generate loss curves from a training CSV log.
 ```bash
-python src/main.py --mode plot --log-dir output/my_experiment/phase1_train.csv
+python src/main.py --mode plot --log-dir output/phase3_fusion/DD-MM-YYYY/HH-MM-SS/phase1_train.csv
 ```
 
 ---

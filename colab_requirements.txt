@@ -1,0 +1,34 @@
+# HIE-GAN Google Colab Requirements
+
+# Core
+numpy
+scipy
+matplotlib
+tqdm
+pillow
+scikit-image
+
+# 3D Libraries
+trimesh
+PyMCubes
+# Open3D (headless version often works better in Colab/Linux environments without display)
+open3d
+
+# Note: trimesh often requires rtree. In Colab, you need:
+# !apt-get install -y libspatialindex-dev
+rtree
+
+# PyTorch Geometric (Dependencies should be installed via specific wheel links, see below)
+# This file serves as a reference for the core python packages.
+
+# --- INSTALLATION COMMANDS FOR COLAB CELL ---
+# 1. System Dependencies
+# !apt-get install -y libspatialindex-dev
+#
+# 2. PyTorch (Usually pre-installed, but ensure version)
+#
+# 3. PyTorch Geometric
+# !pip install torch-scatter torch-sparse torch-cluster torch-spline-conv torch-geometric
+#
+# 4. Install this file
+# !pip install -r colab_requirements.txt
