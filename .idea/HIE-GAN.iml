@@ -6,7 +6,7 @@
       <excludeFolder url="file://$MODULE_DIR$/data" />
       <excludeFolder url="file://$MODULE_DIR$/outputs" />
     </content>
-    <orderEntry type="jdk" jdkName="uv (HIE-GAN)" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="Python 3.10 (HIE-GAN)" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
 </module>
