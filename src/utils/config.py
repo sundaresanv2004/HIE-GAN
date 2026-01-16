@@ -17,8 +17,4 @@ def load_configs(config_dir="src/configs"):
     model_cfg = load_yaml(config_dir / "model.yaml")
     train_cfg = load_yaml(config_dir / "train.yaml")
 
-    # Ensure directories exist
-    os.makedirs(train_cfg["logging"]["log_dir"], exist_ok=True)
-    os.makedirs(train_cfg["checkpoints"]["dir"], exist_ok=True)
-
     return dataset_cfg, model_cfg, train_cfg
