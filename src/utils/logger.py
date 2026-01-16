@@ -88,6 +88,9 @@ class MetricsLogger:
         self.path = log_dir / filename
         self.metrics = {"epochs": [], "steps": []}
         self._load()
+        # Create file if it doesn't exist
+        if not self.path.exists():
+            self._save()
 
     def _load(self):
         if self.path.exists():
@@ -95,6 +98,8 @@ class MetricsLogger:
                 self.metrics = json.load(f)
 
     def _save(self):
+        # Ensure directory exists before saving
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "w") as f:
             json.dump(self.metrics, f, indent=2)
 
