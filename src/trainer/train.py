@@ -23,7 +23,7 @@ from utils.mesh_ops import generate_mesh_from_sdf
 
 from utils.checkpoint import CheckpointManager
 from utils.setup import EnvironmentSetup
-from utils.plotter import plot_training_logs
+from utils.plotter import plot_training_graphs
 from inference.generate import generate_batch
 
 
@@ -348,6 +348,21 @@ class Trainer:
             loss_val = total_loss.item()
             epoch_loss += loss_val
             
+            # Log to CSV every step
+            self.csv_logger.write(epoch, step, loss_val)
+            
+            # Log to metrics JSON every N steps (configurable)
+            log_every_n = self.train_cfg.get("logging", {}).get("log_every_n_steps", 10)
+            if step % log_every_n == 0:
+                self.metrics_logger.log_step(epoch, step, {
+                    "loss": loss_val,
+                    "chamfer_fused": loss_cham_fused.item(),
+                    "chamfer_coarse": loss_cham_coarse.item(),
+                    "sdf": loss_sdf.item(),
+                    "smooth": loss_smooth.item(),
+                    "edge": loss_edge.item()
+                })
+            
             if not self.args.no_tqdm and not self.args.quiet:
                 pbar.set_postfix({
                     "loss": f"{loss_val:.4f}", 
@@ -456,15 +471,24 @@ class Trainer:
                 avg_loss = self.train_epoch(epoch)
                 
                 self.logger.info(f"Epoch {epoch+1} | Train Loss: {avg_loss:.6f}")
-                self.metrics_logger.log_epoch(epoch, {"train_loss": avg_loss})
                 
                 # Validation (can be disabled with --no-validation)
-                avg_val_loss = avg_loss  # Use train loss as fallback
+                avg_val_loss = None
                 
                 if not self.args.no_validation:
                     val_every = self.train_cfg.get("validation", {}).get("val_every", 1)
                     if (epoch + 1) % val_every == 0:
                         avg_val_loss = self.validate(epoch)
+                
+                # Log epoch metrics to JSON (with both train and val loss if available)
+                epoch_metrics = {"train_loss": avg_loss}
+                if avg_val_loss is not None:
+                    epoch_metrics["val_loss"] = avg_val_loss
+                self.metrics_logger.log_epoch(epoch, epoch_metrics)
+                
+                # Use train loss as fallback for best model tracking if no validation
+                if avg_val_loss is None:
+                    avg_val_loss = avg_loss
 
                 # Track best model based on validation (or train) loss
                 is_best = avg_val_loss < self.best_loss
@@ -489,8 +513,11 @@ class Trainer:
         # Generate training graphs (can be disabled with --no-plot)
         if not self.args.no_plot:
             self.logger.info("📊 Generating training graphs...")
-            plot_training_logs(self.exp_dir / self.train_cfg["logging"]["csv_filename"])
-            self.logger.info("✅ Training graphs saved")
+            success = plot_training_graphs(self.exp_dir)
+            if success:
+                self.logger.info("✅ Training graphs saved")
+            else:
+                self.logger.warning("⚠️ Graph generation completed with warnings")
             
         # Automatic testing (can be disabled with --no-test)
         if not self.args.no_test:

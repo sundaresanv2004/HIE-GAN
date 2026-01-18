@@ -302,7 +302,7 @@ def resolve_log_path(log_arg):
 
 if __name__ == "__main__":
     from trainer.train import Trainer
-    from utils.plotter import plot_training_logs
+    from utils.plotter import plot_training_graphs, plot_training_logs
     from inference.generate import generate_batch, generate_single, load_model
 
     args = parse_args()
@@ -381,10 +381,26 @@ if __name__ == "__main__":
             sys.exit(1)
         
         try:
-            csv_path = resolve_log_path(args.log_dir)
-            print(f"📈 Plotting training logs from: {csv_path}")
-            plot_training_logs(csv_path)
-            print("✅ Graphs generated successfully")
+            exp_dir = Path(args.log_dir)
+            if not exp_dir.exists():
+                raise FileNotFoundError(f"Experiment directory not found: {exp_dir}")
+            
+            # Check for metrics.json (new system)
+            metrics_file = exp_dir / "metrics.json"
+            if metrics_file.exists():
+                print(f"📈 Plotting training graphs from: {exp_dir}")
+                success = plot_training_graphs(exp_dir)
+                if success:
+                    print("✅ Graphs generated successfully")
+                else:
+                    print("⚠️ Graph generation completed with warnings")
+            else:
+                # Fallback to legacy CSV plotting
+                print("ℹ️ No metrics.json found, trying legacy CSV plotting...")
+                csv_path = resolve_log_path(args.log_dir)
+                print(f"📈 Plotting training logs from: {csv_path}")
+                plot_training_logs(csv_path)
+                print("✅ Graphs generated successfully")
         except FileNotFoundError as e:
             print(f"❌ {e}")
             sys.exit(1)
