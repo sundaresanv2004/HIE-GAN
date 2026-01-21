@@ -393,15 +393,8 @@ class Trainer:
                 query_pts = query_pts.to(self.device, non_blocking=True)
                 query_sdf_gt = query_sdf_gt.to(self.device, non_blocking=True)
                 
-                # Unified Forward Pass
-                # Fusion requires gradients for SDF normals, even in validation if that's how it works
-                # But typically validation is strictly no_grad unless specific parts need it.
-                # Since FusionModule does `autograd.grad`, we generally need `grad` enabled for INPUTS at least.
-                # However, `autograd.grad` works inside no_grad block IF inputs have requires_grad=True?
-                # Actually, `torch.set_grad_enabled(True)` is safest for Fusion logic.
-                
-                with torch.set_grad_enabled(True):
-                     pred_pc_fused, pred_sdf, pred_pc_exp, feat = self.model(img, query_pts)
+                # Unified Forward Pass (Model handles gradient logic for memory optimization)
+                pred_pc_fused, pred_sdf, pred_pc_exp, feat = self.model(img, query_pts)
                 
                 loss_sdf = self.sdf_loss_fn(pred_sdf, query_sdf_gt)
                 loss_cham_fused = chamfer_loss(pred_pc_fused, gt_pc)
@@ -581,8 +574,7 @@ class Trainer:
                 query_pts = query_pts.to(self.device, non_blocking=True)
                 query_sdf_gt = query_sdf_gt.to(self.device, non_blocking=True)
                 
-                with torch.set_grad_enabled(True):
-                     pred_pc_fused, pred_sdf, pred_pc_exp, feat = self.model(img, query_pts)
+                pred_pc_fused, pred_sdf, pred_pc_exp, feat = self.model(img, query_pts)
                 
                 loss_sdf = self.sdf_loss_fn(pred_sdf, query_sdf_gt)
                 loss_cham_fused = chamfer_loss(pred_pc_fused, gt_pc)

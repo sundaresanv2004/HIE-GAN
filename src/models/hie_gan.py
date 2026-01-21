@@ -28,20 +28,26 @@ class HIEGANModel(nn.Module):
             pred_pc_exp: (B, N_pc, 3) Explicit branch point cloud
             feat: (B, Dim) Global feature vector (returned for loss computation if needed)
         """
-        # 1. Feature Extraction
-        feat = self.encoder(img) # (B, C)
+        if self.training:
+            # Training Mode: Everything needs gradients
+            feat = self.encoder(img) # (B, C)
+            pred_pc_exp = self.explicit(feat)
+            pred_sdf = self.implicit(feat, query_pts)
+            pred_pc_fused = self.fusion(pred_pc_exp, self.implicit, feat)
+            return pred_pc_fused, pred_sdf, pred_pc_exp, feat
         
-        # 2. Explicit Branch
-        pred_pc_exp = self.explicit(feat)
-        
-        # 3. Implicit Branch
-        pred_sdf = self.implicit(feat, query_pts)
-
-        # 4. Fusion Module
-        # Note: Fusion module internally computes gradients for SDF
-        # We pass the implicit module ITSELF to fusion.
-        # However, inside DataParallel, passing sub-modules can be tricky if they are not on same device.
-        # But since 'implicit' is a submodule of THIS module, it is already on the correct device replica.
-        pred_pc_fused = self.fusion(pred_pc_exp, self.implicit, feat)
-        
-        return pred_pc_fused, pred_sdf, pred_pc_exp, feat
+        else:
+            # Inference/Validation Mode: Optimize Memory
+            # 1. Run backbone without gradients (saves huge memory)
+            with torch.no_grad():
+                feat = self.encoder(img)
+                pred_pc_exp = self.explicit(feat)
+                pred_sdf = self.implicit(feat, query_pts)
+            
+            # 2. Run Fusion with gradients enabled (required for autograd.grad internal logic)
+            # The context manager ensures Fusion can compute gradients of SDF w.r.t inputs,
+            # but assumes inputs (feat/pred_pc_exp) are treated as constants/leafs or appropriately detached.
+            with torch.enable_grad():
+                 pred_pc_fused = self.fusion(pred_pc_exp, self.implicit, feat)
+            
+            return pred_pc_fused, pred_sdf, pred_pc_exp, feat
