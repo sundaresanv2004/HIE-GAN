@@ -17,9 +17,11 @@ from models.explicit_branch import ExplicitDeformer
 from models.implicit_branch import ImplicitDecoder
 from models.fusion_module import FusionModule
 from models.hie_gan import HIEGANModel
+from models.discriminator import Discriminator
 from models.init_mesh import create_sphere_mesh
 from losses.chamfer import chamfer_loss
 from losses.sdf_loss import SDFLoss
+from losses.adversarial_loss import AdversarialLoss, GeneratorLoss, DiscriminatorLoss
 from losses.regularizers import smoothness_loss, edge_length_loss
 from utils.mesh_ops import generate_mesh_from_sdf
 
@@ -77,9 +79,14 @@ class Trainer:
         self.explicit = None
         self.implicit = None
         self.fusion = None
+        self.discriminator = None
         self.model = None  # HIEGANModel wrapper
         self.optimizer = None
+        self.optimizer_d = None
         self.sdf_loss_fn = None
+        self.adv_loss_fn = None
+        self.gen_loss_fn = None
+        self.disc_loss_fn = None
         
         self.start_epoch = 0
         self.best_loss = float("inf")
@@ -103,7 +110,11 @@ class Trainer:
 
     def _setup_logging(self):
         logger = setup_logger(self.exp_dir, self.train_cfg["logging"]["log_filename"], quiet=self.args.quiet)
-        csv_logger = CSVLogger(self.exp_dir, self.train_cfg["logging"]["csv_filename"])
+        
+        # Extended CSV logging for Phase 4
+        csv_fields = ["timestamp", "epoch", "step", "loss", "chamfer_fused", "sdf", "d_loss", "g_adv"]
+        csv_logger = CSVLogger(self.exp_dir, self.train_cfg["logging"]["csv_filename"], fieldnames=csv_fields)
+        
         metrics_logger = MetricsLogger(self.exp_dir, "metrics.json")
         return logger, csv_logger, metrics_logger
 
@@ -166,11 +177,17 @@ class Trainer:
         # Fusion Module (Phase 3)
         self.fusion = FusionModule(step_size=1.0).to(self.device)
 
-        # Losses
-        self.sdf_loss_fn = SDFLoss(clamp_dist=0.1, weight=1.0).to(self.device)
-
         # Build Unified Model
         self.model = HIEGANModel(self.encoder, self.explicit, self.implicit, self.fusion).to(self.device)
+        
+        # Discriminator (Phase 4)
+        self.discriminator = Discriminator(input_dim=3).to(self.device)
+
+        # Losses
+        self.sdf_loss_fn = SDFLoss(clamp_dist=0.1, weight=1.0).to(self.device)
+        self.adv_loss_fn = AdversarialLoss(type='lsgan').to(self.device)
+        self.gen_loss_fn = GeneratorLoss(self.adv_loss_fn).to(self.device)
+        self.disc_loss_fn = DiscriminatorLoss(self.adv_loss_fn).to(self.device)
         
         # Count parameters
         total_params = sum(p.numel() for p in self.model.parameters())
@@ -187,6 +204,7 @@ class Trainer:
         if torch.cuda.device_count() > 1:
             self.logger.info(f"🚀 Using {torch.cuda.device_count()} GPUs with DataParallel")
             self.model = nn.DataParallel(self.model)
+            self.discriminator = nn.DataParallel(self.discriminator)
 
     def _build_optimizer(self):
         """Initialize optimizer for all model components"""
@@ -196,6 +214,11 @@ class Trainer:
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
             lr=lr,
+            weight_decay=weight_decay
+        )
+        self.optimizer_d = torch.optim.Adam(
+            self.discriminator.parameters(),
+            lr=lr, # Use same LR for now, or make configurable
             weight_decay=weight_decay
         )
         self.logger.info(f"Optimizer: Adam (lr={lr})")
@@ -278,6 +301,11 @@ class Trainer:
             self.fusion.load_state_dict(checkpoint["fusion_state_dict"])
             
         self.optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "discriminator_state_dict" in checkpoint:
+            self.discriminator.load_state_dict(checkpoint["discriminator_state_dict"])
+        if "optimizer_d_state_dict" in checkpoint:
+            self.optimizer_d.load_state_dict(checkpoint["optimizer_d_state_dict"])
+
         if self.scaler and checkpoint.get("scaler_state_dict"):
             self.scaler.load_state_dict(checkpoint["scaler_state_dict"])
         self.start_epoch = checkpoint["epoch"] + 1
@@ -288,6 +316,13 @@ class Trainer:
         self.model.train()
         
         epoch_loss = 0.0
+        epoch_losses = {
+            "chamfer_fused": 0.0,
+            "sdf": 0.0, 
+            "d_loss": 0.0,
+            "g_adv": 0.0,
+            "total": 0.0
+        }
         num_batches = len(self.train_loader)
         
         if not self.args.no_tqdm:
@@ -324,13 +359,42 @@ class Trainer:
                 total_loss = loss_cham_fused + loss_sdf + loss_cham_coarse + loss_smooth + loss_edge
 
             # Backprop
+            # Backprop
+            
+            # --- Discriminator Update ---
+            self.optimizer_d.zero_grad(set_to_none=True)
+            with torch.amp.autocast('cuda', enabled=(self.scaler is not None)):
+                # Detach generator output for discriminator training
+                d_real = self.discriminator(gt_pc)
+                d_fake = self.discriminator(pred_pc_fused.detach())
+                loss_d = self.disc_loss_fn(d_real, d_fake)
+            
+            if self.scaler:
+                self.scaler.scale(loss_d).backward()
+                self.scaler.step(self.optimizer_d)
+            else:
+                loss_d.backward()
+                self.optimizer_d.step()
+                
+            # --- Generator Update ---
             self.optimizer.zero_grad(set_to_none=True)
+            
+            with torch.amp.autocast('cuda', enabled=(self.scaler is not None)):
+                # Re-compute discriminator output for generator loss (or reuse if graph retained, 
+                # but standard GAN usually re-forwards or just uses the graph from before if no detach?)
+                # We need gradients flowing back to generator, so we must use pred_pc_fused (without detach)
+                # Note: If we didn't retain graph above, we need to run D again. 
+                # Simpler to run D again on fake.
+                d_fake_for_g = self.discriminator(pred_pc_fused)
+                loss_gan = self.gen_loss_fn(d_fake_for_g) * 0.1 # Weight for GAN loss
+                
+                total_loss = loss_cham_fused + loss_sdf + loss_cham_coarse + loss_smooth + loss_edge + loss_gan
             
             if self.scaler:
                 self.scaler.scale(total_loss).backward()
                 if self.args.grad_clip:
                     self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(all_params, self.args.grad_clip)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
@@ -340,10 +404,20 @@ class Trainer:
                 self.optimizer.step()
 
             loss_val = total_loss.item()
-            epoch_loss += loss_val
+            epoch_losses["total"] += loss_val
+            epoch_losses["chamfer_fused"] += loss_cham_fused.item()
+            epoch_losses["sdf"] += loss_sdf.item()
+            epoch_losses["d_loss"] += loss_d.item()
+            epoch_losses["g_adv"] += loss_gan.item()
             
             # Log to CSV every step
-            self.csv_logger.write(epoch, step, loss_val)
+            self.csv_logger.write(epoch, step, {
+                "loss": loss_val,
+                "chamfer_fused": loss_cham_fused.item(),
+                "sdf": loss_sdf.item(),
+                "d_loss": loss_d.item(),
+                "g_adv": loss_gan.item()
+            })
             
             # Log to metrics JSON every N steps (configurable)
             log_every_n = self.train_cfg.get("logging", {}).get("log_every_n_steps", 10)
@@ -354,17 +428,21 @@ class Trainer:
                     "chamfer_coarse": loss_cham_coarse.item(),
                     "sdf": loss_sdf.item(),
                     "smooth": loss_smooth.item(),
-                    "edge": loss_edge.item()
+                    "edge": loss_edge.item(),
+                    "d_loss": loss_d.item(),
+                    "g_adv": loss_gan.item()
                 })
             
             if not self.args.no_tqdm and not self.args.quiet:
                 pbar.set_postfix({
                     "loss": f"{loss_val:.4f}", 
                     "cham_f": f"{loss_cham_fused.item():.4f}",
-                    "sdf": f"{loss_sdf.item():.4f}"
+                    "sdf": f"{loss_sdf.item():.4f}",
+                    "d_loss": f"{loss_d.item():.4f}"
                 })
 
-        return epoch_loss / num_batches
+        # Return average losses
+        return {k: v / num_batches for k, v in epoch_losses.items()}
 
     def validate(self, epoch):
         """Run validation loop and correct saving of metrics/samples"""
@@ -458,10 +536,11 @@ class Trainer:
         try:
             for epoch in range(self.start_epoch, self.train_cfg["epochs"]):
                 epoch_start_time = time.time()
-                avg_loss = self.train_epoch(epoch)
+                train_metrics = self.train_epoch(epoch) # Returns dict now
+                avg_loss = train_metrics["total"]
                 epoch_duration = time.time() - epoch_start_time
                 
-                self.logger.info(f"Epoch {epoch+1} | Train Loss: {avg_loss:.6f} | Time: {epoch_duration:.2f}s")
+                self.logger.info(f"Epoch {epoch+1} | Train Loss: {avg_loss:.6f} | D_Loss: {train_metrics['d_loss']:.4f} | Time: {epoch_duration:.2f}s")
                 
                 # Validation (can be disabled with --no-validation)
                 avg_val_loss = None
@@ -471,9 +550,13 @@ class Trainer:
                     if (epoch + 1) % val_every == 0:
                         avg_val_loss = self.validate(epoch)
                 
-                # Log epoch metrics to JSON (with both train and val loss if available)
+                # Log epoch metrics to JSON
                 epoch_metrics = {
                     "train_loss": avg_loss,
+                    "d_loss": train_metrics["d_loss"],
+                    "g_adv": train_metrics["g_adv"],
+                    "sdf_loss": train_metrics["sdf"],
+                    "cham_loss": train_metrics["chamfer_fused"],
                     "epoch_time": epoch_duration
                 }
                 if avg_val_loss is not None:
@@ -527,8 +610,10 @@ class Trainer:
             "encoder_state_dict": raw_model.encoder.state_dict(),
             "explicit_state_dict": raw_model.explicit.state_dict(),
             "implicit_state_dict": raw_model.implicit.state_dict(),
-            "fusion_state_dict": raw_model.fusion.state_dict(), 
+            "fusion_state_dict": raw_model.fusion.state_dict(),
+            "discriminator_state_dict": self.discriminator.module.state_dict() if hasattr(self.discriminator, "module") else self.discriminator.state_dict(), 
             "optimizer_state_dict": self.optimizer.state_dict(),
+            "optimizer_d_state_dict": self.optimizer_d.state_dict(),
             "scaler_state_dict": self.scaler.state_dict() if self.scaler else None,
             "loss": loss,
             "best_loss": self.best_loss,

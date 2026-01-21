@@ -68,6 +68,15 @@ def plot_training_graphs(exp_dir, output_dir=None):
                 test_loss = entry.get("test_loss")
                 if test_loss is not None:
                     test_losses.append(test_loss)
+                    
+                # GAN Losses
+                if "d_loss" in entry:
+                    if "d_losses" not in locals(): d_losses = []
+                    d_losses.append(entry["d_loss"])
+                    
+                if "g_adv" in entry:
+                    if "g_adv_losses" not in locals(): g_adv_losses = []
+                    g_adv_losses.append(entry["g_adv"])
         
         # Remove None values
         valid_train = [(e, l) for e, l in zip(epoch_nums, train_losses) if l is not None]
@@ -127,6 +136,23 @@ def plot_training_graphs(exp_dir, output_dir=None):
             plt.savefig(comparison_plot_path, dpi=150)
             plt.close()
             print(f"✓ Saved: {comparison_plot_path}")
+            
+        # 4. GAN Loss Plot (if available)
+        if "d_losses" in locals() and "g_adv_losses" in locals() and len(d_losses) > 0:
+            gan_epochs = epoch_nums[:len(d_losses)]
+            plt.figure(figsize=(10, 6))
+            plt.plot(gan_epochs, d_losses, 'r-', linewidth=2, label='Discriminator Loss', alpha=0.7)
+            plt.plot(gan_epochs, g_adv_losses, 'b-', linewidth=2, label='Generator Adv Loss', alpha=0.7)
+            plt.xlabel('Epoch', fontsize=12)
+            plt.ylabel('Loss', fontsize=12)
+            plt.title('GAN Training Stability (D vs G)', fontsize=14, fontweight='bold')
+            plt.legend(fontsize=10)
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            gan_plot_path = output_dir / "gan_loss_stability.png"
+            plt.savefig(gan_plot_path, dpi=150)
+            plt.close()
+            print(f"✓ Saved: {gan_plot_path}")
         
         # 4. Test Loss (if available)
         # Check if there's a test entry in metrics

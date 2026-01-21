@@ -60,23 +60,35 @@ def setup_logger(log_dir, filename, quiet=False):
 class CSVLogger:
     """CSV logger for training metrics"""
 
-    def __init__(self, log_dir, filename):
+    def __init__(self, log_dir, filename, fieldnames=["timestamp", "epoch", "step", "loss"]):
         log_dir = Path(log_dir)
         log_dir.mkdir(parents=True, exist_ok=True)
         self.path = log_dir / filename
+        self.fieldnames = fieldnames
         self._init_file()
 
     def _init_file(self):
         if not self.path.exists():
             with open(self.path, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow(["timestamp", "epoch", "step", "loss"])
+                writer = csv.DictWriter(f, fieldnames=self.fieldnames)
+                writer.writeheader()
 
-    def write(self, epoch, step, loss):
-        ts = datetime.now().isoformat()
+    def write(self, epoch, step, metrics_dict):
+        """
+        metrics_dict: key-value pairs matching fieldnames (excluding timestamp, epoch, step which are auto-filled/passed)
+        """
+        row = {
+            "timestamp": datetime.now().isoformat(),
+            "epoch": epoch,
+            "step": step,
+            **metrics_dict
+        }
+        # Filter out keys not in fieldnames to avoid DictWriter error
+        row = {k: v for k, v in row.items() if k in self.fieldnames}
+        
         with open(self.path, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([ts, epoch, step, f"{loss:.8f}"])
+            writer = csv.DictWriter(f, fieldnames=self.fieldnames)
+            writer.writerow(row)
 
 
 class MetricsLogger:
