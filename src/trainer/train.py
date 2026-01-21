@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
@@ -15,6 +16,7 @@ from models.feature_extractor import FeatureExtractor
 from models.explicit_branch import ExplicitDeformer
 from models.implicit_branch import ImplicitDecoder
 from models.fusion_module import FusionModule
+from models.hie_gan import HIEGANModel
 from models.init_mesh import create_sphere_mesh
 from losses.chamfer import chamfer_loss
 from losses.sdf_loss import SDFLoss
@@ -53,7 +55,10 @@ class Trainer:
         self.device = EnvironmentSetup.setup_device(self.args.device, self.args.quiet)
 
         # Setup mixed precision
-        self.scaler = torch.cuda.amp.GradScaler() if args.mixed_precision else None
+        self.use_amp = args.mixed_precision or self.train_cfg.get("mixed_precision", False)
+        self.scaler = torch.cuda.amp.GradScaler() if self.use_amp else None
+        if self.use_amp:
+            self.logger.info("⚡ Mixed Precision Enabled (FP16)")
         
         # Initialize Checkpoint Manager
         self.ckpt_manager = CheckpointManager(
@@ -72,6 +77,7 @@ class Trainer:
         self.explicit = None
         self.implicit = None
         self.fusion = None
+        self.model = None  # HIEGANModel wrapper
         self.optimizer = None
         self.sdf_loss_fn = None
         
@@ -163,33 +169,32 @@ class Trainer:
         # Losses
         self.sdf_loss_fn = SDFLoss(clamp_dist=0.1, weight=1.0).to(self.device)
 
+        # Build Unified Model
+        self.model = HIEGANModel(self.encoder, self.explicit, self.implicit, self.fusion).to(self.device)
+        
         # Count parameters
-        total_params = sum(p.numel() for p in self.encoder.parameters()) + \
-                       sum(p.numel() for p in self.explicit.parameters()) + \
-                       sum(p.numel() for p in self.implicit.parameters()) + \
-                       sum(p.numel() for p in self.fusion.parameters())
-
+        total_params = sum(p.numel() for p in self.model.parameters())
         self.logger.info(f"Total parameters: {total_params:,}")
 
-        if self.args.compile:
-             self.encoder = torch.compile(self.encoder)
-             self.explicit = torch.compile(self.explicit)
-             self.implicit = torch.compile(self.implicit)
-             # Fusion usually doesn't need compile as it's just ops, but we can try
-             self.fusion = torch.compile(self.fusion)
+        # Compile models if requested (PyTorch 2.0+)
+        use_compile = self.args.compile or self.train_cfg.get("compile", False)
+        if use_compile:
+             self.logger.info("🚀 Compiling models (torch.compile)...")
+             # Compile the whole model
+             self.model = torch.compile(self.model)
+        
+        # Parallelism (Multi-GPU)
+        if torch.cuda.device_count() > 1:
+            self.logger.info(f"🚀 Using {torch.cuda.device_count()} GPUs with DataParallel")
+            self.model = nn.DataParallel(self.model)
 
     def _build_optimizer(self):
         """Initialize optimizer for all model components"""
         lr = float(self.train_cfg["optimizer"]["lr"])
         weight_decay = float(self.args.weight_decay) if self.args.weight_decay else 0.0
 
-        all_params = list(self.encoder.parameters()) + \
-                     list(self.explicit.parameters()) + \
-                     list(self.implicit.parameters()) + \
-                     list(self.fusion.parameters())
-
         self.optimizer = torch.optim.Adam(
-            all_params,
+            self.model.parameters(),
             lr=lr,
             weight_decay=weight_decay
         )
@@ -280,11 +285,8 @@ class Trainer:
         self.logger.info(f"✓ Resumed from epoch {self.start_epoch}")
 
     def train_epoch(self, epoch):
-        self.encoder.train()
-        self.explicit.train()
-        self.implicit.train()
-        self.fusion.train()
-
+        self.model.train()
+        
         epoch_loss = 0.0
         num_batches = len(self.train_loader)
         
@@ -302,22 +304,18 @@ class Trainer:
             query_sdf_gt = query_sdf_gt.to(self.device, non_blocking=True)
 
             # Mixed Precision
-            with torch.cuda.amp.autocast(enabled=(self.scaler is not None)):
-                # 1. Feature Extraction
-                feat = self.encoder(img) # (B, C)
+            with torch.amp.autocast('cuda', enabled=(self.scaler is not None)):
+                # Unified Forward Pass
+                pred_pc_fused, pred_sdf, pred_pc_exp, feat = self.model(img, query_pts)
                 
-                # 2. Explicit Branch
-                pred_pc_exp = self.explicit(feat)
-                
-                # 3. Implicit Branch (SDF Loss)
-                pred_sdf = self.implicit(feat, query_pts)
                 loss_sdf = self.sdf_loss_fn(pred_sdf, query_sdf_gt)
 
-                # 4. Fusion Module
-                pred_pc_fused = self.fusion(pred_pc_exp, self.implicit, feat)
-                
                 # 5. Losses
-                pred_mesh_exp = (pred_pc_exp, self.explicit.E)
+                # Retrieve explicit edges (E from canonical sphere)
+                # Handle DataParallel unwrapping to access attributes
+                raw_model = self.model.module if hasattr(self.model, "module") else self.model
+                
+                pred_mesh_exp = (pred_pc_exp, raw_model.explicit.E)
                 loss_smooth = smoothness_loss(pred_mesh_exp) * 0.1
                 loss_edge = edge_length_loss(pred_mesh_exp) * 0.1
                 loss_cham_coarse = chamfer_loss(pred_pc_exp, gt_pc)
@@ -338,11 +336,7 @@ class Trainer:
             else:
                 total_loss.backward()
                 if self.args.grad_clip:
-                    all_params = list(self.encoder.parameters()) + \
-                                 list(self.explicit.parameters()) + \
-                                 list(self.implicit.parameters()) + \
-                                 list(self.fusion.parameters())
-                    torch.nn.utils.clip_grad_norm_(all_params, self.args.grad_clip)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
                 self.optimizer.step()
 
             loss_val = total_loss.item()
@@ -375,10 +369,7 @@ class Trainer:
     def validate(self, epoch):
         """Run validation loop and correct saving of metrics/samples"""
         self.logger.info("Running validation...")
-        self.encoder.eval()
-        self.explicit.eval()
-        self.implicit.eval()
-        self.fusion.eval()
+        self.model.eval()
         
         val_loss = 0.0
         
@@ -402,13 +393,15 @@ class Trainer:
                 query_pts = query_pts.to(self.device, non_blocking=True)
                 query_sdf_gt = query_sdf_gt.to(self.device, non_blocking=True)
                 
-                feat = self.encoder(img)
-                pred_pc_exp = self.explicit(feat)
-                pred_sdf = self.implicit(feat, query_pts)
+                # Unified Forward Pass
+                # Fusion requires gradients for SDF normals, even in validation if that's how it works
+                # But typically validation is strictly no_grad unless specific parts need it.
+                # Since FusionModule does `autograd.grad`, we generally need `grad` enabled for INPUTS at least.
+                # However, `autograd.grad` works inside no_grad block IF inputs have requires_grad=True?
+                # Actually, `torch.set_grad_enabled(True)` is safest for Fusion logic.
                 
-                # Fusion requires gradients for SDF normals, so we must enable grad temporarily
-                with torch.enable_grad():
-                     pred_pc_fused = self.fusion(pred_pc_exp, self.implicit, feat)
+                with torch.set_grad_enabled(True):
+                     pred_pc_fused, pred_sdf, pred_pc_exp, feat = self.model(img, query_pts)
                 
                 loss_sdf = self.sdf_loss_fn(pred_sdf, query_sdf_gt)
                 loss_cham_fused = chamfer_loss(pred_pc_fused, gt_pc)
@@ -431,7 +424,9 @@ class Trainer:
                         
                         # Save Implicit (Marching Cubes) - expensive, do only 1 or 2
                         if j < 2:
-                            mesh_imp = generate_mesh_from_sdf(self.implicit, feat[j:j+1], resolution=64, device=self.device)
+                            # Access implicit model from wrapper
+                            raw_model = self.model.module if hasattr(self.model, "module") else self.model
+                            mesh_imp = generate_mesh_from_sdf(raw_model.implicit, feat[j:j+1], resolution=64, device=self.device)
                             if mesh_imp:
                                 mesh_imp.export(val_out_dir / f"sample_{j}_implicit.obj")
                                 
@@ -465,12 +460,15 @@ class Trainer:
         self._handle_checkpoint_loading()
 
         self.logger.info("Starting training...")
+        total_start_time = time.time()
         
         try:
             for epoch in range(self.start_epoch, self.train_cfg["epochs"]):
+                epoch_start_time = time.time()
                 avg_loss = self.train_epoch(epoch)
+                epoch_duration = time.time() - epoch_start_time
                 
-                self.logger.info(f"Epoch {epoch+1} | Train Loss: {avg_loss:.6f}")
+                self.logger.info(f"Epoch {epoch+1} | Train Loss: {avg_loss:.6f} | Time: {epoch_duration:.2f}s")
                 
                 # Validation (can be disabled with --no-validation)
                 avg_val_loss = None
@@ -481,7 +479,10 @@ class Trainer:
                         avg_val_loss = self.validate(epoch)
                 
                 # Log epoch metrics to JSON (with both train and val loss if available)
-                epoch_metrics = {"train_loss": avg_loss}
+                epoch_metrics = {
+                    "train_loss": avg_loss,
+                    "epoch_time": epoch_duration
+                }
                 if avg_val_loss is not None:
                     epoch_metrics["val_loss"] = avg_val_loss
                 self.metrics_logger.log_epoch(epoch, epoch_metrics)
@@ -506,8 +507,9 @@ class Trainer:
             self.save_checkpoint(epoch, avg_loss, False)
             
         # Post-training automation
+        total_duration = time.time() - total_start_time
         self.logger.info("\n" + "="*70)
-        self.logger.info("🎉 Training Complete!")
+        self.logger.info(f"🎉 Training Complete! Total Time: {total_duration:.2f}s ({total_duration/60:.2f} min)")
         self.logger.info("="*70)
         
         # Generate training graphs (can be disabled with --no-plot)
@@ -524,12 +526,15 @@ class Trainer:
             self.evaluate_test()
 
     def save_checkpoint(self, epoch, loss, is_best):
+        # Unwrap model to save state dicts compatible with previous structure
+        raw_model = self.model.module if hasattr(self.model, "module") else self.model
+        
         state = {
             "epoch": epoch,
-            "encoder_state_dict": self.encoder.state_dict(),
-            "explicit_state_dict": self.explicit.state_dict(),
-            "implicit_state_dict": self.implicit.state_dict(),
-            "fusion_state_dict": self.fusion.state_dict(), # Phase 3
+            "encoder_state_dict": raw_model.encoder.state_dict(),
+            "explicit_state_dict": raw_model.explicit.state_dict(),
+            "implicit_state_dict": raw_model.implicit.state_dict(),
+            "fusion_state_dict": raw_model.fusion.state_dict(), 
             "optimizer_state_dict": self.optimizer.state_dict(),
             "scaler_state_dict": self.scaler.state_dict() if self.scaler else None,
             "loss": loss,
@@ -557,15 +562,14 @@ class Trainer:
              self.logger.warning("⚠️ No test loader available. Skipping test.")
              return
 
-        self.encoder.eval()
-        self.explicit.eval()
-        self.implicit.eval()
-        self.fusion.eval()
+        self.model.eval()
 
         test_loss = 0.0
         output_dir = self.exp_dir / "test_outputs"
         output_dir.mkdir(parents=True, exist_ok=True)
         
+        # Access unwrapped model for geometry info
+        raw_model = self.model.module if hasattr(self.model, "module") else self.model
         temp_sphere = trimesh.creation.icosphere(subdivisions=self.model_cfg["explicit_branch"]["init_mesh"]["subdivisions"])
 
         with torch.no_grad():
@@ -577,12 +581,8 @@ class Trainer:
                 query_pts = query_pts.to(self.device, non_blocking=True)
                 query_sdf_gt = query_sdf_gt.to(self.device, non_blocking=True)
                 
-                feat = self.encoder(img)
-                pred_pc_exp = self.explicit(feat)
-                pred_sdf = self.implicit(feat, query_pts)
-                
-                with torch.enable_grad():
-                     pred_pc_fused = self.fusion(pred_pc_exp, self.implicit, feat)
+                with torch.set_grad_enabled(True):
+                     pred_pc_fused, pred_sdf, pred_pc_exp, feat = self.model(img, query_pts)
                 
                 loss_sdf = self.sdf_loss_fn(pred_sdf, query_sdf_gt)
                 loss_cham_fused = chamfer_loss(pred_pc_fused, gt_pc)

@@ -7,6 +7,8 @@ output_root: "output"
 batch_size: 64
 num_workers: 4
 epochs: 20
+mixed_precision: true  # Use FP16 for faster training and less memory
+compile: false         # Disabled: FusionModule uses double backward which torch.compile doesn't support yet
 
 # Optimizer configuration
 optimizer:

@@ -14,7 +14,7 @@ classes:
   - "02958343"  # Car
   - "03001627"  # Chair
   - "04379243"  # Table
-  # - "03636649"  # Lamp (optional, uncomment to include)
+  - "03636649"  # Lamp (optional, uncomment to include)
 
 # Class Metadata
 class_names:

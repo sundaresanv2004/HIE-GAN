@@ -46,8 +46,17 @@ docker build -t hiegan-dev .
 
 ```
 docker run --gpus all --shm-size=8g -it \
+    --name hiegan-container \
     -v $(pwd):/workspace \
     hiegan-dev
+```
+
+## Reuse Exiting Container (Don't create new ones)
+
+If you have already created a container, you can restart it instead of creating a new one (which wastes disk space):
+
+```bash
+docker start -ai hiegan-container
 ```
 
 ---
@@ -87,8 +96,15 @@ Run with GPU:
 
 ```
 docker run --gpus all --shm-size=8g -it \
+    --name hiegan-container \
     -v $(pwd):/workspace \
     hiegan-dev
+```
+
+### Resume Existing Container
+
+```bash
+docker start -ai hiegan-container
 ```
 
 ---

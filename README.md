@@ -14,9 +14,17 @@ We strongly recommend using Docker to ensure a consistent environment with corre
 2.  **Run the Container**:
     > **⚠️ Important**: You must use `--shm-size=8g` to prevent "Bus error" during data loading.
     ```bash
+    ```bash
     docker run --gpus all --shm-size=8g -it \
+        --name hiegan-container \
         -v $(pwd):/workspace \
         hiegan-dev
+    ```
+
+3.  **Resume Existing Container**:
+    To avoid creating multiple containers, restart your existing one:
+    ```bash
+    docker start -ai hiegan-container
     ```
 
 For detailed Docker troubleshooting, see [DOCKER_SETUP.md](DOCKER_SETUP.md).
