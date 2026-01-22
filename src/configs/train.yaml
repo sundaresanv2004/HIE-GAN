@@ -9,11 +9,13 @@ num_workers: 4
 epochs: 20
 mixed_precision: true  # Use FP16 for faster training and less memory
 compile: false         # Disabled: FusionModule uses double backward which torch.compile doesn't support yet
+discriminator_update_every: 3 # Update discriminator every N steps to prevent it from overpowering G
 
 # Optimizer configuration
 optimizer:
   type: "adam"
   lr: 1e-4
+  discriminator_lr: 5e-5 # Lower learning rate for discriminator
   weight_decay: 0.0
 
 # Learning rate scheduler
@@ -28,6 +30,14 @@ loss:
   sdf_weight: 1.0
   smoothness_weight: 0.1
   edge_weight: 0.1
+  gan_weight: 0.5        # Increased from 0.1 to stabilize GAN training
+  adversarial_weight: 0.5  # GAN loss weight for generator (increased from 0.1)
+
+# GAN training configuration
+gan:
+  discriminator_lr: 5e-5      # Lower LR for discriminator (half of generator LR)
+  d_update_freq: 2            # Update discriminator every N iterations
+  g_update_freq: 1            # Update generator every N iterations
 
 # Validation configuration
 validation:

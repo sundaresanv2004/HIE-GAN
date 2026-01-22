@@ -113,7 +113,7 @@ class Trainer:
         logger = setup_logger(self.exp_dir, self.train_cfg["logging"]["log_filename"], quiet=self.args.quiet)
         
         # Extended CSV logging for Phase 4
-        csv_fields = ["timestamp", "epoch", "step", "loss", "chamfer_fused", "sdf", "d_loss", "g_adv"]
+        csv_fields = ["timestamp", "epoch", "step", "loss", "recon_loss", "chamfer_fused", "sdf", "d_loss", "g_adv"]
         csv_logger = CSVLogger(self.exp_dir, self.train_cfg["logging"]["csv_filename"], fieldnames=csv_fields)
         
         metrics_logger = MetricsLogger(self.exp_dir, "metrics.json")
@@ -209,20 +209,22 @@ class Trainer:
 
     def _build_optimizer(self):
         """Initialize optimizer for all model components"""
-        lr = float(self.train_cfg["optimizer"]["lr"])
+        lr_g = float(self.train_cfg["optimizer"]["lr"])
+        lr_d = float(self.train_cfg["optimizer"].get("discriminator_lr", lr_g))
         weight_decay = float(self.args.weight_decay) if self.args.weight_decay else 0.0
 
         self.optimizer = torch.optim.Adam(
             self.model.parameters(),
-            lr=lr,
+            lr=lr_g,
             weight_decay=weight_decay
         )
         self.optimizer_d = torch.optim.Adam(
             self.discriminator.parameters(),
-            lr=lr, # Use same LR for now, or make configurable
+            lr=lr_d,
             weight_decay=weight_decay
         )
-        self.logger.info(f"Optimizer: Adam (lr={lr})")
+        self.logger.info(f"Optimizer G: Adam (lr={lr_g})")
+        self.logger.info(f"Optimizer D: Adam (lr={lr_d})")
 
     def _handle_checkpoint_loading(self):
         """
@@ -330,6 +332,7 @@ class Trainer:
         epoch_losses = {
             "chamfer_fused": 0.0,
             "sdf": 0.0, 
+            "recon_loss": 0.0,
             "d_loss": 0.0,
             "g_adv": 0.0,
             "total": 0.0
@@ -369,61 +372,80 @@ class Trainer:
                 
                 total_loss = loss_cham_fused + loss_sdf + loss_cham_coarse + loss_smooth + loss_edge
 
-            # Backprop
-            # Backprop
+            # Backprop with GAN training dynamics
+            # Get GAN training hyperparameters
+            # Get GAN training hyperparameters
+            d_update_freq = self.train_cfg.get("discriminator_update_every", 1)
+            g_update_freq = 1 # Always update generator
+            adv_weight = self.train_cfg.get("loss", {}).get("gan_weight", 0.1)
             
-            # --- Discriminator Update ---
-            self.optimizer_d.zero_grad(set_to_none=True)
-            with torch.amp.autocast('cuda', enabled=(self.scaler is not None)):
-                # Detach generator output for discriminator training
-                d_real = self.discriminator(gt_pc)
-                d_fake = self.discriminator(pred_pc_fused.detach())
-                loss_d = self.disc_loss_fn(d_real, d_fake)
-            
-            if self.scaler:
-                self.scaler.scale(loss_d).backward()
-                self.scaler.step(self.optimizer_d)
-            else:
-                loss_d.backward()
-                self.optimizer_d.step()
+            # --- Discriminator Update (conditional based on frequency) ---
+            if step % d_update_freq == 0:
+                self.optimizer_d.zero_grad(set_to_none=True)
+                with torch.amp.autocast('cuda', enabled=(self.scaler is not None)):
+                    # Detach generator output for discriminator training
+                    d_real = self.discriminator(gt_pc)
+                    d_fake = self.discriminator(pred_pc_fused.detach())
+                    loss_d = self.disc_loss_fn(d_real, d_fake)
                 
-            # --- Generator Update ---
-            self.optimizer.zero_grad(set_to_none=True)
-            
-            with torch.amp.autocast('cuda', enabled=(self.scaler is not None)):
-                # Re-compute discriminator output for generator loss (or reuse if graph retained, 
-                # but standard GAN usually re-forwards or just uses the graph from before if no detach?)
-                # We need gradients flowing back to generator, so we must use pred_pc_fused (without detach)
-                # Note: If we didn't retain graph above, we need to run D again. 
-                # Simpler to run D again on fake.
-                d_fake_for_g = self.discriminator(pred_pc_fused)
-                loss_gan = self.gen_loss_fn(d_fake_for_g) * 0.1 # Weight for GAN loss
-                
-                total_loss = loss_cham_fused + loss_sdf + loss_cham_coarse + loss_smooth + loss_edge + loss_gan
-            
-            if self.scaler:
-                self.scaler.scale(total_loss).backward()
-                if self.args.grad_clip:
-                    self.scaler.unscale_(self.optimizer)
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
-                self.scaler.step(self.optimizer)
-                self.scaler.update()
+                if self.scaler:
+                    self.scaler.scale(loss_d).backward()
+                    self.scaler.step(self.optimizer_d)
+                else:
+                    loss_d.backward()
+                    self.optimizer_d.step()
             else:
-                total_loss.backward()
-                if self.args.grad_clip:
-                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
-                self.optimizer.step()
+                # Still compute loss for logging even if not updating
+                with torch.no_grad():
+                    d_real = self.discriminator(gt_pc)
+                    d_fake = self.discriminator(pred_pc_fused.detach())
+                    loss_d = self.disc_loss_fn(d_real, d_fake)
+                
+            # --- Generator Update (conditional based on frequency) ---
+            if step % g_update_freq == 0:
+                self.optimizer.zero_grad(set_to_none=True)
+                
+                with torch.amp.autocast('cuda', enabled=(self.scaler is not None)):
+                    # Re-compute discriminator output for generator loss
+                    d_fake_for_g = self.discriminator(pred_pc_fused)
+                    loss_gan = self.gen_loss_fn(d_fake_for_g) * adv_weight
+                    
+                    total_loss = loss_cham_fused + loss_sdf + loss_cham_coarse + loss_smooth + loss_edge + loss_gan
+                
+                if self.scaler:
+                    self.scaler.scale(total_loss).backward()
+                    if self.args.grad_clip:
+                        self.scaler.unscale_(self.optimizer)
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
+                else:
+                    total_loss.backward()
+                    if self.args.grad_clip:
+                        torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.grad_clip)
+                    self.optimizer.step()
+            else:
+                # Still compute loss for logging
+                with torch.no_grad():
+                    d_fake_for_g = self.discriminator(pred_pc_fused)
+                    loss_gan = self.gen_loss_fn(d_fake_for_g) * adv_weight
+                    total_loss = loss_cham_fused + loss_sdf + loss_cham_coarse + loss_smooth + loss_edge + loss_gan
 
             loss_val = total_loss.item()
+            loss_val = total_loss.item()
+            recon_loss = loss_cham_fused.item() + loss_sdf.item()
+            
             epoch_losses["total"] += loss_val
             epoch_losses["chamfer_fused"] += loss_cham_fused.item()
             epoch_losses["sdf"] += loss_sdf.item()
+            epoch_losses["recon_loss"] += recon_loss
             epoch_losses["d_loss"] += loss_d.item()
             epoch_losses["g_adv"] += loss_gan.item()
             
             # Log to CSV every step
             self.csv_logger.write(epoch, step, {
                 "loss": loss_val,
+                "recon_loss": recon_loss,
                 "chamfer_fused": loss_cham_fused.item(),
                 "sdf": loss_sdf.item(),
                 "d_loss": loss_d.item(),
@@ -435,6 +457,7 @@ class Trainer:
             if step % log_every_n == 0:
                 self.metrics_logger.log_step(epoch, step, {
                     "loss": loss_val,
+                    "recon_loss": recon_loss,
                     "chamfer_fused": loss_cham_fused.item(),
                     "chamfer_coarse": loss_cham_coarse.item(),
                     "sdf": loss_sdf.item(),
@@ -447,6 +470,7 @@ class Trainer:
             if not self.args.no_tqdm and not self.args.quiet:
                 pbar.set_postfix({
                     "loss": f"{loss_val:.4f}", 
+                    "recon": f"{recon_loss:.4f}",
                     "cham_f": f"{loss_cham_fused.item():.4f}",
                     "sdf": f"{loss_sdf.item():.4f}",
                     "d_loss": f"{loss_d.item():.4f}"
@@ -587,6 +611,7 @@ class Trainer:
                     "g_adv": train_metrics["g_adv"],
                     "sdf_loss": train_metrics["sdf"],
                     "cham_loss": train_metrics["chamfer_fused"],
+                    "recon_loss": train_metrics["recon_loss"],
                     "epoch_time": epoch_duration
                 }
                 if avg_val_loss is not None:
