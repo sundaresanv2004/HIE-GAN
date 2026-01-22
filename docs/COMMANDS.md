@@ -395,11 +395,28 @@ python src/main.py --mode plot --log-dir output/phase3/16-01-2026/01-23-45/train
 ```
 
 #### Plot with Log File (Auto-converts)
-
 ```bash
 python src/main.py --mode plot --log-dir output/phase3/16-01-2026/01-23-45/training.log
 ```
 ℹ️ Automatically converts `.log` → `.csv`
+
+### Aggregated Plotting (Overall Graph)
+Generate a single graph from multiple training sessions (e.g. if you resumed training multiple times):
+
+```bash
+# Point to the experiment root containing timestamped subfolders
+python src/main.py --mode plot --log-dir output/my_experiment
+```
+✅ Automatically finds all `metrics.json` files in subdirectories, merges them sorted by time, and plots the total progress.
+
+### Plotting Options
+Control the appearance of the graphs:
+
+**Change X-Axis Interval**:
+```bash
+# Show a tick every 50 epochs (default: 20)
+python src/main.py --mode plot --log-dir output/my_experiment --interval 50
+```
 
 **What's Generated**:
 - Training loss curve

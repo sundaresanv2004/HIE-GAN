@@ -8,6 +8,7 @@ from pathlib import Path
 import random
 import numpy as np
 import trimesh
+from torchvision.utils import save_image
 
 from utils.config import load_configs
 from utils.logger import setup_logger, CSVLogger, MetricsLogger
@@ -331,7 +332,7 @@ class Trainer:
             pbar = self.train_loader
 
         for step, batch in enumerate(pbar):
-            img, gt_pc, query_pts, query_sdf_gt = batch
+            img, gt_pc, query_pts, query_sdf_gt, _ = batch # Ignore class_idx for training
             
             img = img.to(self.device, non_blocking=True)
             gt_pc = gt_pc.to(self.device, non_blocking=True)
@@ -453,18 +454,22 @@ class Trainer:
         
         # Save output directory for this epoch
         val_out_dir = self.exp_dir / "val_outputs" / f"epoch_{epoch+1}"
-        val_out_dir.mkdir(parents=True, exist_ok=True)
+        if (epoch + 1) % 10 == 0:
+            val_out_dir.mkdir(parents=True, exist_ok=True)
         
         # Create sphere for export
         temp_sphere = trimesh.creation.icosphere(subdivisions=self.model_cfg["explicit_branch"]["init_mesh"]["subdivisions"])
         
+        saved_classes = set()
+        num_classes_to_save = len(self.dataset_cfg["classes"])
+        
         with torch.no_grad():
             for i, batch in enumerate(self.val_loader):
-                # Just take first batch for visualization to save time? 
-                # Or validate on full set for metrics.
-                # Let's compute loss on full set and visualize first batch.
-                
-                img, gt_pc, query_pts, query_sdf_gt = batch
+                if len(saved_classes) >= num_classes_to_save and i > 0:
+                     # Calculate loss for all but skip viz if we have all samples
+                     pass
+
+                img, gt_pc, query_pts, query_sdf_gt, class_indices = batch
                 
                 img = img.to(self.device, non_blocking=True)
                 gt_pc = gt_pc.to(self.device, non_blocking=True)
@@ -480,26 +485,38 @@ class Trainer:
                 total_loss = loss_cham_fused + loss_sdf
                 val_loss += total_loss.item()
                 
-                # Visualize first batch (limit to 5 samples)
-                if i == 0:
-                    for j in range(min(5, img.shape[0])):
-                        # Save Explicit
-                        v_exp = pred_pc_exp[j].cpu().numpy()
-                        mesh_exp = trimesh.Trimesh(vertices=v_exp, faces=temp_sphere.faces)
-                        mesh_exp.export(val_out_dir / f"sample_{j}_explicit.obj")
-                        
-                        # Save Fused
-                        v_fused = pred_pc_fused[j].cpu().numpy()
-                        mesh_fused = trimesh.Trimesh(vertices=v_fused, faces=temp_sphere.faces)
-                        mesh_fused.export(val_out_dir / f"sample_{j}_fused.obj")
-                        
-                        # Save Implicit (Marching Cubes) - expensive, do only 1 or 2
-                        if j < 2:
-                            # Access implicit model from wrapper
+                # Visualize One Per Class - ONLY every 10 epochs to save space
+                # Also save on first epoch for sanity check? 
+                # User asked for "every 10 epoch". Let's do (epoch+1) % 10 == 0.
+                if (epoch + 1) % 10 == 0:
+                    for j in range(img.shape[0]):
+                        cls_idx = class_indices[j].item()
+                        if cls_idx not in saved_classes:
+                            saved_classes.add(cls_idx)
+                            cls_name = self.dataset_cfg["classes"][cls_idx]
+                            
+                            # Save Explicit
+                            v_exp = pred_pc_exp[j].cpu().numpy()
+                            mesh_exp = trimesh.Trimesh(vertices=v_exp, faces=temp_sphere.faces)
+                            mesh_exp.export(val_out_dir / f"val_{cls_name}_explicit.obj")
+                            
+                            # Save Fused
+                            v_fused = pred_pc_fused[j].cpu().numpy()
+                            mesh_fused = trimesh.Trimesh(vertices=v_fused, faces=temp_sphere.faces)
+                            mesh_fused.export(val_out_dir / f"val_{cls_name}_fused.obj")
+                            
+                            # Save Implicit
                             raw_model = self.model.module if hasattr(self.model, "module") else self.model
                             mesh_imp = generate_mesh_from_sdf(raw_model.implicit, feat[j:j+1], resolution=64, device=self.device)
                             if mesh_imp:
-                                mesh_imp.export(val_out_dir / f"sample_{j}_implicit.obj")
+                                mesh_imp.export(val_out_dir / f"val_{cls_name}_implicit.obj")
+                            
+                            # Save Input Image
+                            mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1).to(self.device)
+                            std = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1).to(self.device)
+                            img_denorm = img[j] * std + mean
+                            img_denorm = torch.clamp(img_denorm, 0, 1)
+                            save_image(img_denorm, val_out_dir / f"val_{cls_name}_input.png")
                                 
         avg_val_loss = val_loss / len(self.val_loader)
         self.logger.info(f"Validation Loss: {avg_val_loss:.6f}")
@@ -652,7 +669,7 @@ class Trainer:
 
         with torch.no_grad():
             for i, batch in enumerate(tqdm(self.test_loader, desc="Testing")):
-                img, gt_pc, query_pts, query_sdf_gt = batch
+                img, gt_pc, query_pts, query_sdf_gt, _ = batch # Unpack 5
                 
                 img = img.to(self.device, non_blocking=True)
                 gt_pc = gt_pc.to(self.device, non_blocking=True)

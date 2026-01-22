@@ -132,6 +132,10 @@ def parse_args():
         "--quiet", action="store_true",
         help="Minimal console output"
     )
+    log_group.add_argument(
+        "--interval", type=int, default=20,
+        help="X-axis tick interval for plotting (default: 20)"
+    )
 
     # ===== Data Options =====
     data_group = parser.add_argument_group("Data Options")
@@ -387,20 +391,28 @@ if __name__ == "__main__":
             
             # Check for metrics.json (new system)
             metrics_file = exp_dir / "metrics.json"
-            if metrics_file.exists():
-                print(f"📈 Plotting training graphs from: {exp_dir}")
-                success = plot_training_graphs(exp_dir)
-                if success:
-                    print("✅ Graphs generated successfully")
-                else:
-                    print("⚠️ Graph generation completed with warnings")
-            else:
-                # Fallback to legacy CSV plotting
-                print("ℹ️ No metrics.json found, trying legacy CSV plotting...")
-                csv_path = resolve_log_path(args.log_dir)
-                print(f"📈 Plotting training logs from: {csv_path}")
-                plot_training_logs(csv_path)
+            # Now plotter handles recursive search, so we can just pass the dir
+            # But main.py checked for existence of metrics.json.
+            # We should relax this check to allow recursive plotting on root dir.
+            
+            print(f"📈 Plotting training graphs from: {exp_dir}")
+            
+            # Pass interval from args
+            # plot_training_graphs now returns True on success, False/None on failure
+            success = plot_training_graphs(exp_dir, interval=args.interval)
+            
+            if success:
                 print("✅ Graphs generated successfully")
+            else:
+                # If the new plotter failed (e.g. no metrics.json found even recursively), try legacy
+                print("ℹ️  Standard plotting failed or no metrics.json found, trying legacy CSV plotting...")
+                try:
+                    csv_path = resolve_log_path(args.log_dir)
+                    print(f"📈 Plotting training logs from: {csv_path}")
+                    plot_training_logs(csv_path)
+                    print("✅ Graphs generated successfully")
+                except FileNotFoundError:
+                    print("⚠️  Could not generate graphs (no metrics.json and no CSV log found)")
         except FileNotFoundError as e:
             print(f"❌ {e}")
             sys.exit(1)

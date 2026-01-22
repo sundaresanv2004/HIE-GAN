@@ -4,26 +4,81 @@ import argparse
 import json
 from pathlib import Path
 
-
-def plot_training_graphs(exp_dir, output_dir=None):
+def collect_merged_metrics(exp_dir):
     """
-    Generate comprehensive training graphs from metrics.json
-    
-    Creates:
-    - train_loss.png: Training loss over epochs
-    - val_loss.png: Validation loss over epochs  
-    - train_vs_val_loss.png: Train and Val loss comparison
-    - test_loss.png: Test loss (if available)
-    
-    Args:
-        exp_dir: Experiment directory containing metrics.json
-        output_dir: Output directory for graphs (default: exp_dir/graphs)
+    Recursively find and merge metrics.json files.
+    Returns a unified metrics dictionary.
     """
     exp_dir = Path(exp_dir)
-    metrics_file = exp_dir / "metrics.json"
     
-    if not metrics_file.exists():
-        print(f"❌ Metrics file not found: {metrics_file}")
+    # 1. Try to find metrics.json directly
+    metrics_file = exp_dir / "metrics.json"
+    metrics_list = []
+    
+    if metrics_file.exists():
+        try:
+            with open(metrics_file, 'r') as f:
+                metrics_list.append(json.load(f))
+        except Exception as e:
+            print(f"⚠️ Failed to read {metrics_file}: {e}")
+            
+    # 2. Look for subdirectories (Recursive Mode)
+    # We look for all metrics.json files in subfolders
+    # Exclude the root one if we already added it (to avoid duplication if glob matches it)
+    sub_files = sorted(exp_dir.glob("**/metrics.json"))
+    
+    if not metrics_file.exists() and not sub_files:
+        print(f"❌ No metrics.json found in {exp_dir} or its subdirectories.")
+        return None
+
+    # Identify files we haven't loaded yet
+    for pf in sub_files:
+        if pf.resolve() == metrics_file.resolve():
+            continue
+            
+        try:
+            with open(pf, 'r') as f:
+                data = json.load(f)
+                # rudimentary check to ensure it's a valid metrics file
+                if "epochs" in data or "steps" in data:
+                    metrics_list.append(data)
+        except Exception as e:
+            print(f"⚠️ Failed to read {pf}: {e}")
+            
+    if not metrics_list:
+        return None
+        
+    print(f"✓ Found {len(metrics_list)} metrics files. Merging...")
+    
+    # Merge Metrics
+    # We assume the files are sorted by Glob (alphanumeric path). 
+    # Usually timestamps (YYYY-MM-DD/HH-MM-SS) sort correctly.
+    merged_metrics = {"epochs": [], "steps": []}
+    
+    for m in metrics_list:
+        if "epochs" in m:
+            merged_metrics["epochs"].extend(m["epochs"])
+        if "steps" in m:
+            merged_metrics["steps"].extend(m["steps"])
+            
+    # Remove duplicate epochs if any? 
+    # For now, we assume simple appending is what the user wants (concatenation of runs).
+    
+    return merged_metrics
+
+def plot_training_graphs(exp_dir, output_dir=None, interval=20):
+    """
+    Generate comprehensive training graphs from metrics.json (or aggregated)
+    
+    Args:
+        exp_dir: Experiment directory
+        output_dir: Output directory for graphs
+        interval: X-axis tick interval
+    """
+    exp_dir = Path(exp_dir)
+    
+    metrics = collect_merged_metrics(exp_dir)
+    if not metrics:
         return False
     
     # Setup output directory
@@ -34,14 +89,10 @@ def plot_training_graphs(exp_dir, output_dir=None):
     output_dir.mkdir(parents=True, exist_ok=True)
     
     try:
-        # Load metrics
-        with open(metrics_file, 'r') as f:
-            metrics = json.load(f)
-        
         epochs = metrics.get("epochs", [])
         
         if not epochs:
-            print(f"⚠️  No epoch data found in metrics.json")
+            print(f"⚠️  No epoch data found in metrics.")
             return False
         
         # Extract data
@@ -50,9 +101,12 @@ def plot_training_graphs(exp_dir, output_dir=None):
         val_losses = []
         test_losses = []
         
+        # GAN Losses
+        d_losses = []
+        g_adv_losses = []
+        
         for entry in epochs:
             if isinstance(entry, (int, str)) and entry == "test":
-                # Test entry
                 continue
             
             if isinstance(entry, dict):
@@ -64,27 +118,20 @@ def plot_training_graphs(exp_dir, output_dir=None):
                 train_losses.append(entry.get("train_loss"))
                 val_losses.append(entry.get("val_loss"))
                 
-                # Test loss might be in a separate entry
+                # Test loss
                 test_loss = entry.get("test_loss")
                 if test_loss is not None:
                     test_losses.append(test_loss)
                     
                 # GAN Losses
                 if "d_loss" in entry:
-                    if "d_losses" not in locals(): d_losses = []
                     d_losses.append(entry["d_loss"])
-                    
                 if "g_adv" in entry:
-                    if "g_adv_losses" not in locals(): g_adv_losses = []
                     g_adv_losses.append(entry["g_adv"])
         
-        # Remove None values
+        # Remove None values for standard losses
         valid_train = [(e, l) for e, l in zip(epoch_nums, train_losses) if l is not None]
         valid_val = [(e, l) for e, l in zip(epoch_nums, val_losses) if l is not None]
-        
-        if not valid_train:
-            print("⚠️  No valid training loss data found")
-            return False
         
         train_epochs, train_loss_values = zip(*valid_train) if valid_train else ([], [])
         val_epochs, val_loss_values = zip(*valid_val) if valid_val else ([], [])
@@ -92,19 +139,31 @@ def plot_training_graphs(exp_dir, output_dir=None):
         # Set style
         plt.style.use('seaborn-v0_8-darkgrid')
         
+        # Helper to set xticks
+        def set_xticks(epochs_list):
+            if not epochs_list: return
+            start = int(min(epochs_list))
+            end = int(max(epochs_list))
+            # Ensure we have at least one tick
+            ticks = list(range(start, end + 1, interval))
+            if not ticks: ticks = [start]
+            plt.xticks(ticks)
+
         # 1. Train Loss Plot
-        plt.figure(figsize=(10, 6))
-        plt.plot(train_epochs, train_loss_values, 'b-', linewidth=2, marker='o', markersize=4, label='Train Loss')
-        plt.xlabel('Epoch', fontsize=12)
-        plt.ylabel('Loss', fontsize=12)
-        plt.title('Training Loss vs Epoch', fontsize=14, fontweight='bold')
-        plt.legend(fontsize=10)
-        plt.grid(True, alpha=0.3)
-        plt.tight_layout()
-        train_plot_path = output_dir / "train_loss.png"
-        plt.savefig(train_plot_path, dpi=150)
-        plt.close()
-        print(f"✓ Saved: {train_plot_path}")
+        if valid_train:
+            plt.figure(figsize=(10, 6))
+            plt.plot(train_epochs, train_loss_values, 'b-', linewidth=2, marker='o', markersize=4, label='Train Loss')
+            plt.xlabel('Epoch', fontsize=12)
+            plt.ylabel('Loss', fontsize=12)
+            plt.title('Training Loss vs Epoch', fontsize=14, fontweight='bold')
+            plt.legend(fontsize=10)
+            plt.grid(True, alpha=0.3)
+            set_xticks(train_epochs)
+            plt.tight_layout()
+            train_plot_path = output_dir / "train_loss.png"
+            plt.savefig(train_plot_path, dpi=150)
+            plt.close()
+            print(f"✓ Saved: {train_plot_path}")
         
         # 2. Val Loss Plot (if available)
         if valid_val:
@@ -115,15 +174,17 @@ def plot_training_graphs(exp_dir, output_dir=None):
             plt.title('Validation Loss vs Epoch', fontsize=14, fontweight='bold')
             plt.legend(fontsize=10)
             plt.grid(True, alpha=0.3)
+            set_xticks(val_epochs)
             plt.tight_layout()
             val_plot_path = output_dir / "val_loss.png"
             plt.savefig(val_plot_path, dpi=150)
             plt.close()
             print(f"✓ Saved: {val_plot_path}")
         
-        #3. Train vs Val Loss Comparison (if val available)
-        if valid_val:
+        # 3. Train vs Val Loss Comparison
+        if valid_val and valid_train:
             plt.figure(figsize=(12, 6))
+            # Use intersection of epochs for cleaner plot? Or just plot all.
             plt.plot(train_epochs, train_loss_values, 'b-', linewidth=2, marker='o', markersize=4, label='Train Loss', alpha=0.8)
             plt.plot(val_epochs, val_loss_values, 'g-', linewidth=2, marker='s', markersize=4, label='Val Loss', alpha=0.8)
             plt.xlabel('Epoch', fontsize=12)
@@ -131,43 +192,46 @@ def plot_training_graphs(exp_dir, output_dir=None):
             plt.title('Train vs Validation Loss', fontsize=14, fontweight='bold')
             plt.legend(fontsize=10)
             plt.grid(True, alpha=0.3)
+            set_xticks(list(train_epochs) + list(val_epochs))
             plt.tight_layout()
             comparison_plot_path = output_dir / "train_vs_val_loss.png"
             plt.savefig(comparison_plot_path, dpi=150)
             plt.close()
             print(f"✓ Saved: {comparison_plot_path}")
-            
+        
         # 4. GAN Loss Plot (if available)
-        if "d_losses" in locals() and "g_adv_losses" in locals() and len(d_losses) > 0:
-            gan_epochs = epoch_nums[:len(d_losses)]
-            plt.figure(figsize=(10, 6))
-            plt.plot(gan_epochs, d_losses, 'r-', linewidth=2, label='Discriminator Loss', alpha=0.7)
-            plt.plot(gan_epochs, g_adv_losses, 'b-', linewidth=2, label='Generator Adv Loss', alpha=0.7)
-            plt.xlabel('Epoch', fontsize=12)
-            plt.ylabel('Loss', fontsize=12)
-            plt.title('GAN Training Stability (D vs G)', fontsize=14, fontweight='bold')
-            plt.legend(fontsize=10)
-            plt.grid(True, alpha=0.3)
-            plt.tight_layout()
-            gan_plot_path = output_dir / "gan_loss_stability.png"
-            plt.savefig(gan_plot_path, dpi=150)
-            plt.close()
-            print(f"✓ Saved: {gan_plot_path}")
-        
-        # 4. Test Loss (if available)
-        # Check if there's a test entry in metrics
-        test_entry = None
-        for entry in epochs:
-            if isinstance(entry, dict) and entry.get("epoch") == "test":
-                test_entry = entry
-                break
-        
-        if test_entry and test_entry.get("test_loss") is not None:
-            test_loss_value = test_entry["test_loss"]
+        # We assume d_losses and g_adv_losses align with the first N epochs of train_epochs
+        # Or more accurately, we should zip them with epoch_nums where they exist
+        if len(d_losses) > 0 and len(g_adv_losses) > 0:
+            # Re-align with epochs just to be safe
+            gan_data = []
+            for entry in epochs:
+                if isinstance(entry, dict) and "d_loss" in entry and "g_adv" in entry:
+                    gan_data.append((entry["epoch"], entry["d_loss"], entry["g_adv"]))
             
-            # Bar chart for test loss
+            if gan_data:
+                g_epochs, g_d, g_g = zip(*gan_data)
+                
+                plt.figure(figsize=(10, 6))
+                plt.plot(g_epochs, g_d, 'r-', linewidth=2, label='Discriminator Loss', alpha=0.7)
+                plt.plot(g_epochs, g_g, 'b-', linewidth=2, label='Generator Adv Loss', alpha=0.7)
+                plt.xlabel('Epoch', fontsize=12)
+                plt.ylabel('Loss', fontsize=12)
+                plt.title('GAN Training Stability (D vs G)', fontsize=14, fontweight='bold')
+                plt.legend(fontsize=10)
+                plt.grid(True, alpha=0.3)
+                set_xticks(g_epochs)
+                plt.tight_layout()
+                gan_plot_path = output_dir / "gan_loss_stability.png"
+                plt.savefig(gan_plot_path, dpi=150)
+                plt.close()
+                print(f"✓ Saved: {gan_plot_path}")
+        
+        # 5. Test Loss (if available)
+        if test_losses:
+            avg_test_loss = sum(test_losses) / len(test_losses)
             plt.figure(figsize=(6, 6))
-            plt.bar(['Test Loss'], [test_loss_value], color='orange', alpha=0.7, width=0.5)
+            plt.bar(['Test Loss'], [avg_test_loss], color='orange', alpha=0.7, width=0.5)
             plt.ylabel('Loss', fontsize=12)
             plt.title('Test Loss', fontsize=14, fontweight='bold')
             plt.grid(True, alpha=0.3, axis='y')
@@ -190,7 +254,6 @@ def plot_training_graphs(exp_dir, output_dir=None):
 def plot_training_logs(csv_path, output_dir=None):
     """
     LEGACY: Reads the training CSV log and plots Loss vs Step/Epoch.
-    Kept for backward compatibility.
     """
     csv_path = Path(csv_path)
     if not csv_path.exists():
@@ -238,8 +301,9 @@ def plot_training_logs(csv_path, output_dir=None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate training graphs")
-    parser.add_argument("exp_dir", type=str, help="Experiment directory (contains metrics.json)")
+    parser.add_argument("exp_dir", type=str, help="Experiment directory (contains metrics.json or subfolders)")
     parser.add_argument("--output-dir", "-o", type=str, default=None, help="Output directory for graphs")
+    parser.add_argument("--interval", "-i", type=int, default=20, help="X-axis tick interval (default: 20)")
     parser.add_argument("--legacy", action="store_true", help="Use legacy CSV plotting (provide CSV path as exp_dir)")
     
     args = parser.parse_args()
@@ -247,4 +311,4 @@ if __name__ == "__main__":
     if args.legacy:
         plot_training_logs(args.exp_dir, args.output_dir)
     else:
-        plot_training_graphs(args.exp_dir, args.output_dir)
+        plot_training_graphs(args.exp_dir, args.output_dir, args.interval)

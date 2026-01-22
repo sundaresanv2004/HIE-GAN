@@ -155,17 +155,22 @@ class DatasetLoader:
         self.logger.info("🔍 Inspecting sample data...")
 
         try:
-            # Unpack assuming 4 items for Phase 2: img, pc, points, sdf
+            # Unpack assuming 5 items now
             sample = dataset[0]
-            if len(sample) == 4:
-                img, pc, query_pts, query_sdf = sample
+            if len(sample) == 5:
+                img, pc, query_pts, query_sdf, class_idx = sample
                 self.logger.info(f"   Image: {img.shape} {img.dtype}")
                 self.logger.info(f"   PC: {pc.shape} {pc.dtype}")
                 self.logger.info(f"   Query Pts: {query_pts.shape} {query_pts.dtype}")
                 self.logger.info(f"   Query SDF: {query_sdf.shape} {query_sdf.dtype}")
+                self.logger.info(f"   Class Index: {class_idx}")
                 self.logger.info(f"   SDF Range: {query_sdf.min():.4f} to {query_sdf.max():.4f}")
+            elif len(sample) == 4:
+                # Fallback for old style if needed, though we just changed getitem
+                 img, pc, query_pts, query_sdf = sample
+                 self.logger.info(f"   Got 4 items (Legacy)")
             else:
-                self.logger.info(f"   Got {len(sample)} items in sample (Legacy Phase 1?)")
+                self.logger.info(f"   Got {len(sample)} items in sample")
 
         except Exception as e:
             self.logger.warning(f"⚠️  Failed to inspect sample: {e}")
@@ -242,6 +247,7 @@ class ShapeNetDataset(torch.utils.data.Dataset):
     Phase 2 Adds: SDF sampling
     """
 
+
     def __init__(self, root_dir, classes, pc_filename="model_normalized.ply", image_size=224, num_points=2500, num_sdf_samples=2048):
         self.root_dir = Path(root_dir)
         self.classes = classes
@@ -249,14 +255,14 @@ class ShapeNetDataset(torch.utils.data.Dataset):
         self.image_size = image_size
         self.num_points = num_points
         self.num_sdf_samples = num_sdf_samples
-        self.object_paths = []
+        self.object_paths = [] # List of tuples (path, class_idx)
 
         # Collecting all object paths
         if not self.root_dir.exists():
             print(f"⚠️  Dataset root not found: {self.root_dir}")
             return
 
-        for class_id in self.classes:
+        for i, class_id in enumerate(self.classes):
             class_dir = self.root_dir / class_id
             if not class_dir.exists():
                 print(f"⚠️  Class directory not found: {class_dir} (class_id: {class_id})")
@@ -270,7 +276,7 @@ class ShapeNetDataset(torch.utils.data.Dataset):
                     has_pc = (obj_path / self.pc_filename).exists()
                     
                     if has_images and has_pc:
-                        self.object_paths.append(str(obj_path))
+                        self.object_paths.append((str(obj_path), i))
                         objects_found += 1
                     elif not has_images:
                         print(f"⚠️  Missing 'images' folder in: {obj_path.name}")
@@ -292,7 +298,8 @@ class ShapeNetDataset(torch.utils.data.Dataset):
         return len(self.object_paths)
 
     def __getitem__(self, idx):
-        obj_path = Path(self.object_paths[idx])
+        obj_path_str, class_idx = self.object_paths[idx]
+        obj_path = Path(obj_path_str)
 
         # 1. Load Image
         image_tensor = self._load_image(obj_path)
@@ -304,7 +311,7 @@ class ShapeNetDataset(torch.utils.data.Dataset):
         # 3. Compute SDF Samples (Phase 2)
         query_points, query_sdf = self._sample_sdf(mesh)
 
-        return image_tensor, gt_pc, query_points, query_sdf
+        return image_tensor, gt_pc, query_points, query_sdf, class_idx
 
     def _load_image(self, obj_path):
         img_dir = obj_path / "images"
