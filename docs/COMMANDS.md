@@ -264,9 +264,13 @@ python src/main.py --mode resume --checkpoint output/phase3/16-01-2026/01-23-45
 ```
 
 **Smart Detection**:
-- 🏆 Automatically loads `checkpoint_best.pth` (highest priority)
-- ⏰ Falls back to `checkpoint_latest.pth` (if no best)
-- 📝 Uses most recent `checkpoint_epoch_*.pth` (fallback)
+- **For Resume Mode**:
+  - ⏰ Priority 1: `checkpoint_latest.pth` (to continue training)
+  - 🏆 Priority 2: `checkpoint_best.pth` (fallback)
+- **For Test/Generate**:
+  - 🏆 Priority 1: `checkpoint_best.pth` (best performance)
+  - ⏰ Priority 2: `checkpoint_latest.pth` (fallback)
+- 📝 Fallback: Uses most recent `checkpoint_epoch_*.pth`
 
 #### Method 2: Direct Checkpoint File
 

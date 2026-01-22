@@ -256,11 +256,21 @@ class Trainer:
                         self.logger.error(f"❌ No 'checkpoints' folder found in: {ckpt_path}")
                         raise FileNotFoundError(f"Checkpoint directory not found: {checkpoints_dir}")
                 
-                # Priority: best > latest > most recent epoch
+                # Priority depends on mode
                 best_ckpt = checkpoints_dir / "checkpoint_best.pth"
                 latest_ckpt = checkpoints_dir / "checkpoint_latest.pth"
                 
-                if best_ckpt.exists():
+                # For resuming training, prioritize latest checkpoint
+                if self.args.mode == "resume":
+                    if latest_ckpt.exists():
+                        self.logger.info(f"⏰ Loading latest checkpoint for resume: {latest_ckpt}")
+                        checkpoint = self.ckpt_manager.load(latest_ckpt, self.device)
+                    elif best_ckpt.exists():
+                        self.logger.info(f"🏆 Latest checkpoint not found, falling back to best: {best_ckpt}")
+                        checkpoint = self.ckpt_manager.load(best_ckpt, self.device)
+                
+                # For testing/inference (or explicit load), prioritize best checkpoint
+                elif best_ckpt.exists():
                     self.logger.info(f"🏆 Loading best checkpoint from: {best_ckpt}")
                     checkpoint = self.ckpt_manager.load(best_ckpt, self.device)
                 elif latest_ckpt.exists():
@@ -453,8 +463,11 @@ class Trainer:
         val_loss = 0.0
         
         # Save output directory for this epoch
-        val_out_dir = self.exp_dir / "val_outputs" / f"epoch_{epoch+1}"
-        if (epoch + 1) % 10 == 0:
+        should_save_viz = (epoch + 1) % 10 == 0
+        val_out_dir = None
+        
+        if should_save_viz:
+            val_out_dir = self.exp_dir / "val_outputs" / f"epoch_{epoch+1}"
             val_out_dir.mkdir(parents=True, exist_ok=True)
         
         # Create sphere for export
@@ -488,7 +501,7 @@ class Trainer:
                 # Visualize One Per Class - ONLY every 10 epochs to save space
                 # Also save on first epoch for sanity check? 
                 # User asked for "every 10 epoch". Let's do (epoch+1) % 10 == 0.
-                if (epoch + 1) % 10 == 0:
+                if should_save_viz:
                     for j in range(img.shape[0]):
                         cls_idx = class_indices[j].item()
                         if cls_idx not in saved_classes:
